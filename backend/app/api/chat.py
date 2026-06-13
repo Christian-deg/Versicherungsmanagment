@@ -16,7 +16,7 @@ router = APIRouter()
 @router.post("", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     try:
-        result = await ask(req.frage)
+        result = await ask(req.frage, [(m.rolle, m.text) for m in req.verlauf])
     except InputGuardrailTripwireTriggered as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

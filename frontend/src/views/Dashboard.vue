@@ -54,8 +54,9 @@
         <v-card color="secondary" theme="dark">
           <v-skeleton-loader v-if="initialLoading" type="list-item" color="secondary" theme="dark" />
           <v-card-text v-else>
-            <div class="text-overline">Kosten / Monat</div>
-            <div class="text-h4">{{ formatEur(financial?.total_month_eur) }}</div>
+            <div class="text-overline">Kosten</div>
+            <div class="text-h4">{{ formatEur(financial?.total_month_eur) }} <span class="text-body-2">/ Monat</span></div>
+            <div class="text-h6 mt-1">{{ formatEur(financial?.total_year_eur) }} <span class="text-body-2">/ Jahr</span></div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -195,14 +196,36 @@ const summaryText = computed(() => {
   if (!insurances.value.length) {
     return 'Starte am einfachsten mit dem Upload einer bestehenden Police, damit die Daten automatisch vorbefüllt werden.'
   }
-  return `${formatCurrency(financial.value?.total_month_eur)} pro Monat · ${upcomingExpiries.value.length} Fristen in den nächsten 90 Tagen`
+  return `${formatCurrency(financial.value?.total_month_eur)} pro Monat · ${formatCurrency(financial.value?.total_year_eur)} pro Jahr · ${upcomingExpiries.value.length} Fristen in den nächsten 90 Tagen`
 })
 
 const categoryChartSeries = computed(() => Object.values(financial.value?.by_category || {}))
 const categoryChartOptions = computed(() => ({
   labels: Object.keys(financial.value?.by_category || {}),
   legend: { position: 'bottom' },
-  dataLabels: { enabled: true },
+  // Absolute Euro-Werte auf den Segmenten statt Prozente
+  dataLabels: {
+    enabled: true,
+    formatter: (val, opts) => formatCurrency(opts.w.globals.series[opts.seriesIndex]),
+  },
+  tooltip: {
+    y: { formatter: (val) => formatCurrency(val) },
+  },
+  plotOptions: {
+    pie: {
+      donut: {
+        labels: {
+          show: true,
+          value: { formatter: (val) => formatCurrency(Number(val)) },
+          total: {
+            show: true,
+            label: 'Gesamt p.a.',
+            formatter: (w) => formatCurrency(w.globals.seriesTotals.reduce((a, b) => a + b, 0)),
+          },
+        },
+      },
+    },
+  },
 }))
 
 const formatEur = formatCurrency

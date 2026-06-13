@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from app.agents.recommendation_agent import _run_web_search
+from app.agents.web_search_tool import run_web_search
 from app.config import settings
 from app.services.web_search_service import (
     BraveSearchService,
@@ -75,20 +75,20 @@ def test_factory_unknown_provider() -> None:
 
 async def test_tool_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "search_api_key", "")
-    out = json.loads(await _run_web_search("kfz vergleich"))
+    out = json.loads(await run_web_search("kfz vergleich"))
     assert "error" in out
 
 
 async def test_tool_rejects_empty_query(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "search_api_key", "test-key")
-    out = json.loads(await _run_web_search("   "))
+    out = json.loads(await run_web_search("   "))
     assert "error" in out
 
 
 async def test_tool_blocks_sensitive_query(monkeypatch: pytest.MonkeyPatch) -> None:
     """LLM02: sensible Daten dürfen den externen Suchdienst nie erreichen."""
     monkeypatch.setattr(settings, "search_api_key", "test-key")
-    out = json.loads(await _run_web_search("vergleich tarif api_key=geheim123"))
+    out = json.loads(await run_web_search("vergleich tarif api_key=geheim123"))
     assert "error" in out
     assert "sensible Daten" in out["error"]
 
@@ -113,9 +113,9 @@ async def test_tool_filters_injected_results(monkeypatch: pytest.MonkeyPatch) ->
             ]
 
     monkeypatch.setattr(
-        "app.agents.recommendation_agent.get_search_service",
+        "app.agents.web_search_tool.get_search_service",
         lambda *args, **kwargs: FakeService(),
     )
-    out = json.loads(await _run_web_search("kfz vergleich"))
+    out = json.loads(await run_web_search("kfz vergleich"))
     assert len(out) == 1
     assert out[0]["url"] == "https://ok.example"

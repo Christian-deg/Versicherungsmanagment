@@ -4,26 +4,26 @@
       <div>
         <h1 class="text-h4">Dokument hochladen</h1>
         <p class="text-medium-emphasis mt-1">
-          Lade eine Police als PDF oder Foto hoch, prüfe die Extraktion und speichere sie direkt ab.
+          Lade eine Police oder eine Produktrechnung hoch — die KI erkennt automatisch, worum es sich handelt.
         </p>
       </div>
     </div>
 
     <v-alert type="info" variant="tonal" class="mb-4">
-      <strong>Einfacher Ablauf:</strong> Datei auswählen → KI-Vorschlag prüfen → fehlende Felder ergänzen →
-      Versicherung speichern.
+      <strong>Einfacher Ablauf:</strong> Datei auswählen → Typ wird erkannt (Versicherung oder Rechnung) →
+      KI-Vorschlag prüfen → speichern.
     </v-alert>
 
     <v-card v-if="!preview">
       <v-card-text>
         <v-file-input
           v-model="files"
-          label="PDF oder Foto (JPEG/PNG) der Versicherungspolice"
+          label="PDF oder Foto (JPEG/PNG) — Police oder Rechnung"
           accept="application/pdf,image/png,image/jpeg"
           prepend-icon="mdi-camera"
           show-size
           multiple
-          hint="Erlaubt sind PDF, PNG und JPEG bis 10 MB. Mehrere Dateien möglich – die erste wird von der KI analysiert."
+          hint="Versicherungsdokumente bis 80 MB, Rechnungen bis 10 MB. Mehrere Dateien möglich – die erste wird von der KI analysiert."
           persistent-hint
           :disabled="loading"
         />
@@ -39,9 +39,19 @@
           {{ uploadLabel }}
         </v-btn>
         <v-progress-linear v-if="loading" indeterminate color="primary" class="mt-3" />
+
+        <v-alert v-if="typeChoice" type="info" variant="tonal" class="mt-3">
+          Der Dokumenttyp konnte nicht eindeutig erkannt werden. Wie soll die Datei verarbeitet werden?
+          <div class="d-flex flex-wrap ga-2 mt-2">
+            <v-btn size="small" color="primary" @click="analyzeAsInsurance">Als Versicherung analysieren</v-btn>
+            <v-btn size="small" variant="outlined" @click="goToInvoiceFlow">Als Rechnung verarbeiten</v-btn>
+          </div>
+        </v-alert>
+
         <p class="mt-3 text-medium-emphasis">
-          Die KI extrahiert Versicherer, Vertragsnummer, Laufzeit und Prämie aus der ersten Datei.
-          Weitere Dateien werden als zusätzliche Dokumente zur Versicherung gespeichert.
+          Versicherungen: KI extrahiert Versicherer, Vertragsnummer, Laufzeit und Prämie; weitere
+          Dateien werden als zusätzliche Dokumente gespeichert. Rechnungen: Weiterleitung in den
+          Rechnungs-Ablauf mit Kaufdatum-/Betrags-Erkennung.
         </p>
       </v-card-text>
     </v-card>
@@ -130,10 +140,12 @@ import { useRouter } from 'vue-router'
 import { useDisplay } from 'vuetify'
 import { documentsApi } from '../api'
 import { insuranceCategories, paymentIntervals } from '../constants'
+import { useTransferStore } from '../stores/transfer'
 import { confidenceColor, formatRecurringDate, parseRecurringDate } from '../utils'
 
 const { smAndDown } = useDisplay()
 const router = useRouter()
+const transfer = useTransferStore()
 const files = ref([])
 const preview = ref(null)
 const form = ref({ name: '' })
@@ -159,8 +171,11 @@ const primaryFile = computed(() => {
   return Array.isArray(f) ? (f[0] ?? null) : f
 })
 
+const typeChoice = ref(false)
+
 const uploadLabel = computed(() => {
   if (!loading.value) return 'Hochladen & analysieren'
+  if (loadingPhase.value === 'classifying') return 'Dokumenttyp wird erkannt…'
   if (loadingPhase.value === 'analyzing') return 'KI analysiert Dokument…'
   if (loadingPhase.value === 'extra') return 'Weitere Dokumente hochladen…'
   return 'Hochladen…'
@@ -184,7 +199,46 @@ function syncName() {
 
 async function onUpload() {
   loading.value = true
+  loadingPhase.value = 'classifying'
+  typeChoice.value = false
+  try {
+    const cls = await documentsApi.classify(primaryFile.value)
+    if (cls.typ === 'rechnung') {
+      goToInvoiceFlow()
+      return
+    }
+    if (cls.typ === 'unbekannt') {
+      typeChoice.value = true
+      return
+    }
+  } catch (e) {
+    // Klassifizierung ist nur Komfort — bei Fehlern Auswahl anbieten
+    typeChoice.value = true
+    return
+  } finally {
+    loading.value = false
+    loadingPhase.value = ''
+  }
+  await analyzeAsInsurance()
+}
+
+function goToInvoiceFlow() {
+  const allFiles = (Array.isArray(files.value) ? files.value : [files.value]).filter(Boolean)
+  if (allFiles.length > 1) {
+    snack.value = {
+      show: true,
+      color: 'info',
+      text: 'Rechnung erkannt — nur die erste Datei wird in den Rechnungs-Ablauf übernommen.',
+    }
+  }
+  transfer.setPendingInvoiceFile(primaryFile.value)
+  router.push({ path: '/invoices', query: { upload: '1' } })
+}
+
+async function analyzeAsInsurance() {
+  loading.value = true
   loadingPhase.value = 'analyzing'
+  typeChoice.value = false
   nameManuallyEdited.value = false
   extraDocumentIds.value = []
   try {

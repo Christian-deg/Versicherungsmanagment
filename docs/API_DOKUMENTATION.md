@@ -199,10 +199,11 @@ wird das Kaufdatum des Produkts verwendet, ersatzweise das heutige Datum.
 ### `POST /api/invoices/analyze`
 
 Analysiert eine Rechnungsdatei per KI (ohne sie zu speichern) und gibt einen
-Vorschlag für Kaufdatum, Betrag und Notiz zurück. Bei PDFs mit Textlayer wird
-der Text direkt analysiert, sonst per Vision-Modell. Schlägt die Analyse fehl,
-kommen leere Felder zurück — der Upload erfolgt erst nach Bestätigung über
-`POST /api/invoices`.
+Vorschlag für Kaufdatum, Betrag, Produktname und Notiz zurück. Bei PDFs mit
+Textlayer wird der Text direkt analysiert, sonst per Vision-Modell. Schlägt die
+Analyse fehl, kommen leere Felder zurück — der Upload erfolgt erst nach
+Bestätigung über `POST /api/invoices`. Der `produkt_name` dient als Vorschlag
+für die Direkt-Anlage eines neuen Produkts im Frontend.
 
 Request:
 - `multipart/form-data`
@@ -214,6 +215,7 @@ Response-Beispiel:
 {
   "purchase_date": "2025-11-20",
   "amount_eur": 899.99,
+  "produkt_name": "Samsung TV QLED",
   "notes": "MediaMarkt – Samsung TV"
 }
 ```
@@ -239,7 +241,7 @@ Unterstützt:
 - JPG/JPEG
 
 Maximalgröße:
-- 10 MB
+- 10 MB (Rechnungen; Versicherungsdokumente bis 80 MB)
 
 Response:
 - `201 Created`
@@ -270,19 +272,60 @@ Liefert eine einzelne Rechnung.
 Fehler:
 - `404`, wenn die Rechnung nicht existiert
 
+### `GET /api/invoices/{invoice_id}/download`
+
+Liefert die gespeicherte Rechnungsdatei als Download (Content-Disposition:
+attachment mit dem Original-Dateinamen).
+
+Response:
+- die Datei mit ihrem ursprünglichen MIME-Typ
+
+Fehler:
+- `404`, wenn die Rechnung nicht existiert
+- `410`, wenn die Datei nicht mehr auf der Festplatte liegt
+
 ### `DELETE /api/invoices/{invoice_id}`
 
-Löscht eine Rechnung samt gespeicherter Datei. Das Löschen ist erst möglich,
-wenn die Aufbewahrungsfrist abgelaufen ist.
+Löscht eine Rechnung samt gespeicherter Datei. Während der Aufbewahrungsfrist
+ist das Löschen nur mit `?force=true` möglich (das Frontend verlangt dafür eine
+explizite Bestätigung) — gedacht für versehentlich hochgeladene Dateien.
+
+Query-Parameter:
+- `force` – optionaler Boolean (Standard `false`): löscht auch bei laufender Frist
 
 Response:
 - `204 No Content`
 
 Fehler:
 - `404`, wenn die Rechnung nicht existiert
-- `409`, solange `retain_until` in der Zukunft liegt (die Fehlermeldung nennt das Fristende)
+- `409`, solange `retain_until` in der Zukunft liegt und `force` nicht gesetzt ist
 
 ## Dokumente
+
+### `POST /api/documents/classify`
+
+Erkennt automatisch, ob ein Upload eine Versicherung oder eine Produktrechnung
+ist (günstiger Vorab-Check: Mini-Modell, Textlayer bevorzugt, Vision nur mit der
+ersten Seite). Die Datei wird dabei **nicht** gespeichert — das Frontend leitet
+anhand des Ergebnisses in den passenden Ablauf weiter.
+
+Request:
+- `multipart/form-data`, Feldname `file` (PDF/PNG/JPG, max. 80 MB)
+
+Response-Beispiel:
+
+```json
+{
+  "typ": "rechnung",
+  "begruendung": "Enthält Händlername, Artikelliste und Gesamtbetrag inkl. MwSt."
+}
+```
+
+`typ` ist `"versicherung"`, `"rechnung"` oder `"unbekannt"` (bei Fehlern oder
+unklaren Dokumenten — der Nutzer wählt dann selbst).
+
+Fehler:
+- `400` bei Dateiproblemen
 
 ### `POST /api/documents/upload`
 
@@ -298,7 +341,7 @@ Unterstützt:
 - JPG/JPEG
 
 Maximalgröße:
-- 10 MB
+- 80 MB
 
 Response:
 - `ExtractionPreview`
@@ -332,7 +375,7 @@ Die zurückgegebene Dokument-ID wird beim Confirm über `extra_document_ids`
 mit zugeordnet.
 
 Request:
-- `multipart/form-data`, Feldname `file` (PDF/PNG/JPG, max. 10 MB)
+- `multipart/form-data`, Feldname `file` (PDF/PNG/JPG, max. 80 MB)
 
 Response:
 - `201`-artig `DocumentRead` (Dokument liegt zunächst unter `_incoming`)
@@ -377,7 +420,7 @@ Keine KI-Feldextraktion; das Dokument wird gespeichert und im Hintergrund
 volltextindiziert (inkl. Vision-OCR-Fallback), sodass es im Chat auffindbar ist.
 
 Request:
-- `multipart/form-data`, Feldname `file` (PDF/PNG/JPG, max. 10 MB)
+- `multipart/form-data`, Feldname `file` (PDF/PNG/JPG, max. 80 MB)
 
 Response:
 - `201 Created`, `DocumentRead`
@@ -396,19 +439,34 @@ Response:
 Fehler:
 - `404`, wenn das Dokument nicht existiert
 
-### `POST /api/documents/{insurance_id}/recommendation`
+### `GET /api/documents/{insurance_id}/recommendation`
 
-Erzeugt eine strukturierte Empfehlung für eine Versicherung.
+Liefert die **gespeicherte** Empfehlung einer Versicherung (ohne neue KI-Bewertung).
 
 Response-Beispiel:
 
 ```json
 {
-  "handlungsbedarf": "PRUEFEN",
+  "handlungsbedarf": "pruefen",
   "hinweis": "Vergleich lohnt sich.",
-  "details": "Die Prämie liegt im Verhältnis zum Referenzwert ..."
+  "details": "Die Prämie liegt im Verhältnis zum Referenzwert ...",
+  "created_at": "2026-06-13T09:00:00+00:00"
 }
 ```
+
+Fehler:
+- `404`, wenn die Versicherung nicht existiert **oder** noch keine Empfehlung erzeugt wurde
+
+### `POST /api/documents/{insurance_id}/recommendation`
+
+Erzeugt (oder erneuert) die Empfehlung und **speichert** sie. Der Empfehlungs-Agent
+bewertet ganzheitlich: Jahresprämie vs. Marktdurchschnitt, Vertragsdetails aus dem
+Dokumentvolltext (Deckungssumme, Selbstbehalt, Ausschlüsse — via Tool
+`get_versicherung_details`) und aktuelle Marktinfos via Websuche. Empfehlungen
+werden zusätzlich **wöchentlich vom Scheduler geprüft** und nach einem Jahr
+automatisch neu bewertet.
+
+Response: wie `GET` (inkl. `created_at`).
 
 Fehler:
 - `404`, wenn die Versicherung nicht existiert
@@ -418,20 +476,33 @@ Fehler:
 
 ### `POST /api/chat`
 
-Sendet eine Nutzerfrage an den QA-Agenten.
+Sendet eine Nutzerfrage an den QA-Agenten — optional mit dem bisherigen
+Gesprächsverlauf, damit Folgefragen funktionieren („Und wann läuft die ab?").
 
 Request-Body:
 
 ```json
 {
-  "frage": "Wann läuft meine nächste Versicherung ab?"
+  "frage": "Und wann läuft die ab?",
+  "verlauf": [
+    { "rolle": "user", "text": "Welche KFZ-Versicherung habe ich?" },
+    { "rolle": "assistant", "text": "Du hast eine KFZ-Versicherung bei der Allianz." }
+  ]
 }
 ```
+
+- `verlauf` ist optional (Standard: leer = Frage ohne Kontext)
+- max. 30 Nachrichten, Rollen nur `user`/`assistant`, je max. 4000 Zeichen
+- Der Verlauf wird nur pro Browser-Sitzung gehalten — beim erneuten Öffnen der
+  Assistenten-Seite beginnt ein neuer Chat
+- Der Prompt-Injection-Guardrail prüft Frage und Verlauf
 
 Der Agent beantwortet Fragen zu:
 - gespeicherten Stammdaten (Prämien, Laufzeiten, Versicherer)
 - konkreten Vertragsbedingungen aus dem Dokumentvolltext (Selbstbehalt, Ausschlüsse,
   Deckungssummen u.ä.), sofern der Volltext beim Upload erfolgreich extrahiert wurde
+- **aktueller Marktlage / Tarifen** via Websuche (`web_search`-Tool, nur allgemeine
+  Marktinfos, niemals mit persönlichen Daten); setzt `SEARCH_API_KEY` in der `.env` voraus
 
 Response-Beispiel:
 

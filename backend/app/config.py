@@ -26,7 +26,8 @@ class Settings(BaseSettings):
 
     # Storage
     data_dir: Path = Path("./data")
-    max_upload_bytes: int = 10 * 1024 * 1024  # 10 MB
+    max_upload_bytes: int = 80 * 1024 * 1024  # 80 MB (Versicherungsdokumente — oft viele Seiten)
+    max_invoice_upload_bytes: int = 10 * 1024 * 1024  # 10 MB (Rechnungen/Belege)
 
     # Logging
     log_level: str = "INFO"

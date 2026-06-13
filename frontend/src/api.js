@@ -25,6 +25,13 @@ export const productsApi = {
 }
 
 export const documentsApi = {
+  classify: (file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post('/documents/classify', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
   upload: (file) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -51,6 +58,13 @@ export const documentsApi = {
     }).then(r => r.data)
   },
   delete: (documentId) => api.delete(`/documents/${documentId}`),
+  // GET: gespeicherte Empfehlung (null, wenn noch keine vorhanden)
+  recommendationGet: (insuranceId) =>
+    api.get(`/documents/${insuranceId}/recommendation`).then(r => r.data).catch((e) => {
+      if (e.response?.status === 404) return null
+      throw e
+    }),
+  // POST: Empfehlung neu erzeugen / erneuern
   recommendation: (insuranceId) =>
     api.post(`/documents/${insuranceId}/recommendation`).then(r => r.data),
 }
@@ -76,9 +90,10 @@ export const invoicesApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     }).then(r => r.data)
   },
-  delete: (id) => api.delete(`/invoices/${id}`),
+  delete: (id, { force = false } = {}) =>
+    api.delete(`/invoices/${id}`, { params: force ? { force: true } : {} }),
 }
 
 export const chatApi = {
-  ask: (frage) => api.post('/chat', { frage }).then(r => r.data),
+  ask: (frage, verlauf = []) => api.post('/chat', { frage, verlauf }).then(r => r.data),
 }

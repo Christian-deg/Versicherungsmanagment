@@ -218,21 +218,36 @@
       </v-card>
     </v-dialog>
 
-    <v-dialog v-model="recDialog" max-width="500">
+    <v-dialog v-model="recDialog" max-width="540" :fullscreen="smAndDown">
       <v-card>
-        <v-card-title>KI-Empfehlung</v-card-title>
+        <v-card-title class="d-flex align-center">
+          KI-Empfehlung
+          <v-spacer />
+          <v-btn v-if="smAndDown" icon="mdi-close" variant="text" @click="recDialog = false" />
+        </v-card-title>
         <v-card-text>
           <div v-if="recLoading" class="text-center py-6">
             <v-progress-circular indeterminate color="primary" class="mb-3" />
-            <div class="text-body-2 text-medium-emphasis">KI analysiert Versicherung…</div>
+            <div class="text-body-2 text-medium-emphasis">KI bewertet Versicherung…</div>
           </div>
           <template v-else-if="rec">
             <v-chip :color="recColor" class="mb-3">{{ rec.handlungsbedarf }}</v-chip>
             <p><strong>{{ rec.hinweis }}</strong></p>
             <p class="mt-2">{{ rec.details }}</p>
+            <div class="text-caption text-medium-emphasis mt-3">
+              Stand: {{ formatDate(rec.created_at) }} · wird jährlich automatisch erneuert
+            </div>
           </template>
         </v-card-text>
         <v-card-actions>
+          <v-btn
+            variant="text"
+            prepend-icon="mdi-refresh"
+            :loading="recLoading"
+            @click="regenerateRecommendation"
+          >
+            Neu bewerten
+          </v-btn>
           <v-spacer />
           <v-btn @click="recDialog = false">Schließen</v-btn>
         </v-card-actions>
@@ -368,6 +383,7 @@ const dialog = ref(false)
 const recDialog = ref(false)
 const rec = ref(null)
 const recLoading = ref(false)
+const recTarget = ref(null)
 const editing = ref({})
 const snack = ref({ show: false, color: 'success', text: '' })
 const search = ref('')
@@ -581,13 +597,30 @@ async function onDocDelete() {
 }
 
 async function getRecommendation(item) {
+  recTarget.value = item
   rec.value = null
   recLoading.value = true
   recDialog.value = true
   try {
-    rec.value = await documentsApi.recommendation(item.id)
+    // Zuerst gespeicherte Empfehlung laden; falls noch keine existiert, neu erzeugen
+    rec.value = await documentsApi.recommendationGet(item.id)
+    if (!rec.value) {
+      rec.value = await documentsApi.recommendation(item.id)
+    }
   } catch (e) {
     recDialog.value = false
+    snack.value = { show: true, color: 'error', text: 'Empfehlung fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
+  } finally {
+    recLoading.value = false
+  }
+}
+
+async function regenerateRecommendation() {
+  if (!recTarget.value) return
+  recLoading.value = true
+  try {
+    rec.value = await documentsApi.recommendation(recTarget.value.id)
+  } catch (e) {
     snack.value = { show: true, color: 'error', text: 'Empfehlung fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
   } finally {
     recLoading.value = false

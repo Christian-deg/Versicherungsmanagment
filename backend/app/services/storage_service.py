@@ -30,10 +30,16 @@ class StorageError(ValueError):
     pass
 
 
-def validate_upload(filename: str, content: bytes) -> tuple[str, str]:
-    """Prüft Dateiname, Suffix, Größe und Magic-Bytes. Gibt (suffix, mime) zurück."""
-    if len(content) > settings.max_upload_bytes:
-        raise StorageError(f"Datei zu groß: {len(content)} Bytes (max {settings.max_upload_bytes})")
+def validate_upload(filename: str, content: bytes, max_bytes: int | None = None) -> tuple[str, str]:
+    """Prüft Dateiname, Suffix, Größe und Magic-Bytes. Gibt (suffix, mime) zurück.
+
+    max_bytes: Größenlimit; Standard ist settings.max_upload_bytes (Dokumente).
+    Rechnungen verwenden das größere settings.max_invoice_upload_bytes.
+    """
+    limit = max_bytes if max_bytes is not None else settings.max_upload_bytes
+    if len(content) > limit:
+        mb = limit / (1024 * 1024)
+        raise StorageError(f"Datei zu groß: {len(content)} Bytes (max {mb:.0f} MB)")
     if len(content) < 16:
         raise StorageError("Datei zu klein / leer")
 
@@ -94,7 +100,7 @@ def store_invoice(
 
     Gibt (resolved_path, mime_type) zurück.
     """
-    suffix, mime = validate_upload(original_filename, content)
+    suffix, mime = validate_upload(original_filename, content, max_bytes=settings.max_invoice_upload_bytes)
 
     year = (ref_date or date.today()).year
     base = settings.invoices_dir.resolve()

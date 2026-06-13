@@ -40,6 +40,9 @@ class Insurance(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
     documents: Mapped[list[Document]] = relationship(back_populates="insurance", cascade="all, delete-orphan")
+    recommendation: Mapped[Recommendation | None] = relationship(
+        back_populates="insurance", uselist=False, cascade="all, delete-orphan"
+    )
 
 
 class Document(Base):
@@ -110,3 +113,20 @@ class Notification(Base):
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Recommendation(Base):
+    """Gespeicherte KI-Empfehlung je Versicherung (eine pro Vertrag, jährlich aufgefrischt)."""
+
+    __tablename__ = "recommendations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    insurance_id: Mapped[int] = mapped_column(
+        ForeignKey("insurances.id"), nullable=False, unique=True, index=True
+    )
+    handlungsbedarf: Mapped[str] = mapped_column(String(20), nullable=False)
+    hinweis: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    insurance: Mapped[Insurance] = relationship(back_populates="recommendation")

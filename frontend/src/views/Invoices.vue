@@ -79,11 +79,16 @@
           </span>
           <v-spacer />
           <v-btn
+            icon="mdi-download"
+            size="small"
+            variant="text"
+            :href="`/api/invoices/${item.id}/download`"
+          />
+          <v-btn
             icon="mdi-delete"
             size="small"
             variant="text"
             :color="canDelete(item.retain_until) ? 'error' : 'grey'"
-            :disabled="!canDelete(item.retain_until)"
             @click="confirmDelete(item)"
           />
         </v-card-actions>
@@ -107,7 +112,18 @@
         </v-chip>
       </template>
       <template #item.actions="{ item }">
-        <v-tooltip :text="canDelete(item.retain_until) ? 'Löschen' : `Aufbewahrung bis ${formatDate(item.retain_until)}`" location="top">
+        <v-tooltip text="Herunterladen" location="top">
+          <template #activator="{ props }">
+            <v-btn
+              v-bind="props"
+              icon="mdi-download"
+              size="small"
+              variant="text"
+              :href="`/api/invoices/${item.id}/download`"
+            />
+          </template>
+        </v-tooltip>
+        <v-tooltip :text="canDelete(item.retain_until) ? 'Löschen' : `Löschen (Aufbewahrung bis ${formatDate(item.retain_until)} — Bestätigung nötig)`" location="top">
           <template #activator="{ props }">
             <v-btn
               v-bind="props"
@@ -115,7 +131,6 @@
               size="small"
               variant="text"
               :color="canDelete(item.retain_until) ? 'error' : 'grey'"
-              :disabled="!canDelete(item.retain_until)"
               @click="confirmDelete(item)"
             />
           </template>
@@ -143,22 +158,19 @@
           <v-btn v-if="smAndDown" icon="mdi-close" variant="text" @click="uploadDialog = false" />
         </v-card-title>
 
-        <!-- Schritt 1: Datei + Produkt -->
+        <!-- Schritt 1: Datei wählen -->
         <v-card-text v-if="uploadStep === 1">
           <p class="text-body-2 text-medium-emphasis mb-4">
-            Datei hochladen – die KI liest Kaufdatum und Betrag automatisch aus.
+            Datei hochladen – die KI liest Kaufdatum, Betrag und Produktname automatisch aus.
+            Das Produkt wählst du im nächsten Schritt (oder legst es direkt neu an).
           </p>
-          <v-select
-            v-model="form.product_id"
-            :items="productOptions"
-            label="Produkt *"
-            required
-          />
           <v-file-input
             v-model="form.file"
             label="Datei (PDF, PNG, JPG) *"
             accept=".pdf,.png,.jpg,.jpeg"
             prepend-icon="mdi-paperclip"
+            hint="Bis 10 MB"
+            persistent-hint
           />
         </v-card-text>
         <v-card-actions v-if="uploadStep === 1">
@@ -167,7 +179,7 @@
           <v-btn
             color="primary"
             :loading="analyzing"
-            :disabled="!form.product_id || !form.file || analyzing"
+            :disabled="!form.file || analyzing"
             @click="doAnalyze"
             prepend-icon="mdi-robot"
           >
@@ -175,7 +187,7 @@
           </v-btn>
         </v-card-actions>
 
-        <!-- Schritt 2: Extrahierte Felder bestätigen -->
+        <!-- Schritt 2: Extrahierte Felder bestätigen + Produkt zuordnen -->
         <v-card-text v-if="uploadStep === 2">
           <v-alert type="info" variant="tonal" density="compact" class="mb-4">
             KI-Vorschlag – bitte prüfen und bei Bedarf korrigieren.
@@ -189,6 +201,38 @@
             </v-col>
           </v-row>
           <v-textarea v-model="form.notes" label="Notizen (Händler / Produkt)" rows="2" />
+
+          <div class="text-subtitle-2 mt-2 mb-2">Produkt zuordnen</div>
+          <v-btn-toggle v-model="productMode" mandatory density="comfortable" class="mb-3" color="primary">
+            <v-btn value="existing" size="small">Vorhandenes Produkt</v-btn>
+            <v-btn value="new" size="small">Neues Produkt anlegen</v-btn>
+          </v-btn-toggle>
+
+          <v-select
+            v-if="productMode === 'existing'"
+            v-model="form.product_id"
+            :items="productOptions"
+            label="Produkt *"
+            no-data-text="Noch keine Produkte — lege links ein neues an"
+          />
+          <template v-else>
+            <v-text-field v-model="newProduct.name" label="Produktname *" />
+            <v-row>
+              <v-col cols="12" sm="6">
+                <v-text-field v-model="newProduct.kategorie" label="Kategorie (frei)" />
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-text-field
+                  v-model="newProduct.warranty_end"
+                  label="Garantieende – optional"
+                  type="date"
+                  hint="Verlängert ggf. die Aufbewahrungsfrist"
+                  persistent-hint
+                />
+              </v-col>
+            </v-row>
+          </template>
+
           <v-alert v-if="retainPreview" type="info" variant="tonal" class="mt-2" density="compact">
             Aufbewahrung bis: <strong>{{ retainPreview }}</strong>
           </v-alert>
@@ -196,7 +240,7 @@
         <v-card-actions v-if="uploadStep === 2">
           <v-btn @click="uploadStep = 1" prepend-icon="mdi-arrow-left">Zurück</v-btn>
           <v-spacer />
-          <v-btn color="primary" :loading="uploading" :disabled="uploading" @click="doUpload">
+          <v-btn color="primary" :loading="uploading" :disabled="!canUpload || uploading" @click="doUpload">
             Hochladen
           </v-btn>
         </v-card-actions>
@@ -204,17 +248,32 @@
     </v-dialog>
 
     <!-- Löschen-Bestätigung -->
-    <v-dialog v-model="deleteDialog" max-width="420">
+    <v-dialog v-model="deleteDialog" max-width="460">
       <v-card>
         <v-card-title>Rechnung löschen</v-card-title>
         <v-card-text>
           Möchtest du die Rechnung <strong>„{{ deleteTarget?.original_filename }}"</strong> wirklich löschen?
           Diese Aktion kann nicht rückgängig gemacht werden.
+          <template v-if="deleteNeedsForce">
+            <v-alert type="warning" variant="tonal" density="compact" class="mt-3">
+              Die Aufbewahrungsfrist läuft noch bis
+              <strong>{{ formatDate(deleteTarget?.retain_until) }}</strong>. Lösche die Rechnung nur,
+              wenn sie versehentlich hochgeladen wurde oder du den Beleg nicht mehr brauchst.
+            </v-alert>
+            <v-checkbox
+              v-model="forceDeleteConfirmed"
+              density="compact"
+              hide-details
+              label="Ich möchte die Rechnung trotz laufender Aufbewahrungsfrist löschen"
+            />
+          </template>
         </v-card-text>
         <v-card-actions>
           <v-spacer />
           <v-btn @click="deleteDialog = false">Abbrechen</v-btn>
-          <v-btn color="error" @click="doDelete">Löschen</v-btn>
+          <v-btn color="error" :disabled="deleteNeedsForce && !forceDeleteConfirmed" @click="doDelete">
+            Löschen
+          </v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -228,7 +287,10 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from 'vuetify'
 import { invoicesApi, productsApi } from '../api'
+import { useTransferStore } from '../stores/transfer'
 import { formatDate, formatCurrency, daysUntil } from '../utils'
+
+const transfer = useTransferStore()
 
 const route = useRoute()
 const router = useRouter()
@@ -247,8 +309,21 @@ const uploading = ref(false)
 const analyzing = ref(false)
 const uploadStep = ref(1)
 const snack = ref({ show: false, color: 'success', text: '' })
+const forceDeleteConfirmed = ref(false)
+const productMode = ref('existing')  // 'existing' | 'new'
+const newProduct = ref({ name: '', kategorie: '', warranty_end: '' })
 
 const form = ref({ product_id: null, file: null, purchase_date: '', amount_eur: '', notes: '' })
+
+const deleteNeedsForce = computed(
+  () => deleteTarget.value && !canDelete(deleteTarget.value.retain_until)
+)
+
+const canUpload = computed(() =>
+  productMode.value === 'existing'
+    ? Boolean(form.value.product_id)
+    : Boolean(newProduct.value.name.trim())
+)
 
 const headers = [
   { title: 'Produkt', key: 'product_id' },
@@ -314,15 +389,19 @@ const filteredItems = computed(() => {
 
 // Vorschau der Aufbewahrungsfrist beim Upload berechnen
 const retainPreview = computed(() => {
-  if (!form.value.product_id || !form.value.purchase_date) return null
-  const product = products.value.find((p) => p.id === form.value.product_id)
-  if (!product) return null
-  const pd = new Date(form.value.purchase_date)
-  const minRetain = new Date(pd)
+  if (!form.value.purchase_date) return null
+  let warrantyEnd = null
+  if (productMode.value === 'existing') {
+    if (!form.value.product_id) return null
+    warrantyEnd = products.value.find((p) => p.id === form.value.product_id)?.warranty_end || null
+  } else {
+    warrantyEnd = newProduct.value.warranty_end || null
+  }
+  const minRetain = new Date(form.value.purchase_date)
   minRetain.setDate(minRetain.getDate() + 730)
   let retain = minRetain
-  if (product.warranty_end) {
-    const we = new Date(product.warranty_end)
+  if (warrantyEnd) {
+    const we = new Date(warrantyEnd)
     if (we > retain) retain = we
   }
   return formatDate(retain.toISOString().slice(0, 10))
@@ -341,14 +420,16 @@ async function load() {
   }
 }
 
-function openUpload() {
+function openUpload(presetFile = null) {
   form.value = {
     product_id: productFilter.value || null,
-    file: null,
+    file: presetFile ? [presetFile] : null,
     purchase_date: '',
     amount_eur: '',
     notes: '',
   }
+  productMode.value = products.value.length ? 'existing' : 'new'
+  newProduct.value = { name: '', kategorie: '', warranty_end: '' }
   uploadStep.value = 1
   uploadDialog.value = true
 }
@@ -361,6 +442,10 @@ async function doAnalyze() {
     form.value.purchase_date = result.purchase_date || ''
     form.value.amount_eur = result.amount_eur != null ? result.amount_eur : ''
     form.value.notes = result.notes || ''
+    // KI-Vorschlag für die Direkt-Anlage eines neuen Produkts übernehmen
+    if (result.produkt_name && !newProduct.value.name) {
+      newProduct.value.name = result.produkt_name
+    }
     uploadStep.value = 2
   } catch (e) {
     // Analyse fehlgeschlagen → trotzdem zu Schritt 2, Felder leer
@@ -377,14 +462,33 @@ async function doAnalyze() {
 async function doUpload() {
   uploading.value = true
   try {
+    let productId = form.value.product_id
+    if (productMode.value === 'new') {
+      // Produkt direkt mit anlegen — Kaufdatum von der Rechnung übernehmen
+      const created = await productsApi.create({
+        name: newProduct.value.name.trim(),
+        kategorie: newProduct.value.kategorie.trim() || 'Sonstiges',
+        purchase_date: form.value.purchase_date || null,
+        warranty_end: newProduct.value.warranty_end || null,
+        linked_insurance_id: null,
+        notes: '',
+      })
+      productId = created.id
+    }
     const file = Array.isArray(form.value.file) ? form.value.file[0] : form.value.file
-    await invoicesApi.upload(form.value.product_id, file, {
+    await invoicesApi.upload(productId, file, {
       purchaseDate: form.value.purchase_date || undefined,
       amountEur: form.value.amount_eur ? parseFloat(form.value.amount_eur) : undefined,
       notes: form.value.notes || undefined,
     })
     uploadDialog.value = false
-    snack.value = { show: true, color: 'success', text: 'Rechnung erfolgreich hochgeladen.' }
+    snack.value = {
+      show: true,
+      color: 'success',
+      text: productMode.value === 'new'
+        ? 'Produkt angelegt und Rechnung hochgeladen.'
+        : 'Rechnung erfolgreich hochgeladen.',
+    }
     await load()
   } catch (e) {
     snack.value = { show: true, color: 'error', text: 'Upload fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
@@ -395,19 +499,21 @@ async function doUpload() {
 
 function confirmDelete(item) {
   deleteTarget.value = item
+  forceDeleteConfirmed.value = false
   deleteDialog.value = true
 }
 
 async function doDelete() {
   deleteDialog.value = false
   try {
-    await invoicesApi.delete(deleteTarget.value.id)
+    await invoicesApi.delete(deleteTarget.value.id, { force: deleteNeedsForce.value })
     snack.value = { show: true, color: 'success', text: 'Rechnung gelöscht.' }
     await load()
   } catch (e) {
     snack.value = { show: true, color: 'error', text: 'Löschen fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
   } finally {
     deleteTarget.value = null
+    forceDeleteConfirmed.value = false
   }
 }
 
@@ -418,7 +524,12 @@ onMounted(async () => {
   }
   await load()
   initialLoading.value = false
-  if (route.query.upload === '1') {
+  // Von der Upload-Seite weitergereichte Datei (Dokumenttyp "Rechnung" erkannt)
+  const pending = transfer.takePendingInvoiceFile()
+  if (pending) {
+    openUpload(pending)
+    await doAnalyze()
+  } else if (route.query.upload === '1') {
     openUpload()
   }
 })

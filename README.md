@@ -21,7 +21,10 @@ via Pushover.
 
 ## Features
 
-- 📄 **Dokumentenanalyse**: PDF/Foto hochladen → KI extrahiert Versicherer, Vertragsnummer, Laufzeit, Prämie
+- 📄 **Dokumentenanalyse**: PDF/Foto hochladen → KI erkennt automatisch, ob es eine Versicherung
+  oder eine Produktrechnung ist, und extrahiert die passenden Felder (Versicherer, Vertragsnummer,
+  Laufzeit, Prämie bzw. Kaufdatum, Betrag, Produktname); bei Rechnungen kann das Produkt direkt
+  mit angelegt werden (Rechnungen bis 80 MB)
 - 🤖 **Chat-Assistent**: Fragen beantworten via RAG über alle gespeicherten Dokumente
 - 📅 **Kalender / Zeitstrahl**: alle Versicherungen + Garantien auf einen Blick
 - 💰 **Finanzübersicht**: Kosten pro Monat, pro Kategorie, Gesamtkosten
@@ -152,10 +155,8 @@ Alle Agenten folgen einheitlichen Sicherheitsregeln (OWASP LLM Top 10, siehe `AG
 
 ## Zukünftige Features
 
-- 📥 **Rechnungs-Download**: `GET /api/invoices/{id}/download` zum Abruf gespeicherter Rechnungsdateien über die API
 - 🗄️ **ChromaDB-Migration**: Rückmigration zur ChromaDB, sobald Speicherprobleme auf diesem System behoben sind
 - 🔄 **Embedding-Datenbank-Wartung**: Manuelle Aktualisierung der Vektor-DB mit Konsistenzprüfung — prüft, ob alle Dokumente in der Embeddings-Datenbank vorhanden sind, und trägt fehlende Einträge neu ein
-- 📊 **Jahresübersicht auf dem Dashboard**: Karte mit absoluten Jahresgesamtkosten und Aufschlüsselung nach Kategorie (Daten kommen bereits von `GET /api/insurances/summary/financial`); mobil als vertikale Liste statt Chart
 - 🧮 **Prozentualer Anteil je Versicherung**: in Tabelle und mobiler Karte Jahresprämie plus Anteil an den Gesamtkosten anzeigen (z. B. „240 € / Jahr · 12 % der Gesamtkosten") — reine Frontendberechnung
 
 ## Lizenz

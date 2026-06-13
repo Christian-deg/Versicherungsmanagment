@@ -9,14 +9,20 @@ from agents.exceptions import InputGuardrailTripwireTriggered, OutputGuardrailTr
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.agents.classifier_agent import classify_document
 from app.agents.document_agent import analyze_document
-from app.agents.recommendation_agent import evaluate as evaluate_recommendation
 from app.config import settings
 from app.models.database import get_db
-from app.models.enums import INTERVALS_PER_YEAR
-from app.models.models import Document, Insurance
-from app.schemas.schemas import DocumentRead, ExtractionPreview, InsuranceConfirmPayload, InsuranceRead
-from app.services import embedding_service, storage_service
+from app.models.models import Document, Insurance, Recommendation
+from app.schemas.schemas import (
+    DocumentClassification,
+    DocumentRead,
+    ExtractionPreview,
+    InsuranceConfirmPayload,
+    InsuranceRead,
+    RecommendationRead,
+)
+from app.services import embedding_service, recommendation_service, storage_service
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -71,6 +77,50 @@ async def _embed_document_task(
         await embedding_service.embed_and_store(insurance_id, document_id, rag_text)
     except Exception:  # noqa: BLE001
         log.exception("Embedding fehlgeschlagen für Dokument %d", document_id)
+
+
+@router.post("/classify", response_model=DocumentClassification)
+async def classify_uploaded_document(
+    file: UploadFile = File(...),
+) -> DocumentClassification:
+    """Erkennt automatisch, ob ein Upload eine Versicherung oder eine Rechnung ist.
+
+    Günstiger Vorab-Check (Mini-Modell, Textlayer bevorzugt, Vision nur mit der
+    ersten Seite). Die Datei wird dabei nicht gespeichert — das Frontend leitet
+    anhand des Ergebnisses in den passenden Ablauf weiter.
+    """
+    # Großzügigstes Limit, da der Typ noch unbekannt ist
+    classify_limit = max(settings.max_upload_bytes, settings.max_invoice_upload_bytes)
+    content = await file.read(classify_limit + 1)
+    try:
+        suffix, _ = storage_service.validate_upload(
+            file.filename or "upload", content, max_bytes=classify_limit
+        )
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    incoming = settings.documents_dir.resolve() / "_incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    tmp_path = incoming / f"_classify_{uuid.uuid4().hex}{suffix}"
+    tmp_path.write_bytes(content)
+
+    try:
+        try:
+            text = storage_service.extract_document_text(str(tmp_path))
+        except storage_service.StorageError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+        first_page: bytes | None = None
+        if not text:
+            try:
+                images = storage_service.read_document_image_bytes(str(tmp_path))
+                first_page = images[0] if images else None
+            except storage_service.StorageError as e:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    result = await classify_document(text, first_page)
+    return DocumentClassification(typ=result.typ.value, begruendung=result.begruendung)
 
 
 @router.post("/upload", response_model=ExtractionPreview)
@@ -355,27 +405,25 @@ def delete_document(document_id: int, db: Session = Depends(get_db)) -> None:
     db.commit()
 
 
-@router.post("/{insurance_id}/recommendation")
-async def get_recommendation(
-    insurance_id: int,
-    db: Session = Depends(get_db),
-) -> dict:
+@router.get("/{insurance_id}/recommendation", response_model=RecommendationRead)
+def get_recommendation(insurance_id: int, db: Session = Depends(get_db)) -> Recommendation:
+    """Gibt die gespeicherte Empfehlung zurück (404, wenn noch keine erzeugt wurde)."""
     ins = db.get(Insurance, insurance_id)
     if not ins:
         raise HTTPException(status_code=404, detail="Versicherung nicht gefunden")
-    per_year = (
-        ins.praemie_eur * INTERVALS_PER_YEAR.get(ins.zahlungsintervall, 1)
-        if ins.praemie_eur is not None
-        else None
-    )
-    summary = (
-        f"Kategorie: {ins.kategorie.value}\n"
-        f"Versicherer: {ins.versicherer}\n"
-        f"Zahlungsintervall: {ins.zahlungsintervall.value}\n"
-        f"Prämie pro Jahr (EUR): {per_year if per_year is not None else 'unbekannt'}\n"
-    )
+    if ins.recommendation is None:
+        raise HTTPException(status_code=404, detail="Noch keine Empfehlung vorhanden")
+    return ins.recommendation
+
+
+@router.post("/{insurance_id}/recommendation", response_model=RecommendationRead)
+async def create_recommendation(insurance_id: int, db: Session = Depends(get_db)) -> Recommendation:
+    """Erzeugt (oder erneuert) die Empfehlung für eine Versicherung und speichert sie."""
+    ins = db.get(Insurance, insurance_id)
+    if not ins:
+        raise HTTPException(status_code=404, detail="Versicherung nicht gefunden")
     try:
-        rec = await evaluate_recommendation(summary)
+        return await recommendation_service.generate_for_insurance(db, ins)
     except (InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered) as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -387,5 +435,4 @@ async def get_recommendation(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Empfehlung fehlgeschlagen. Details siehe Server-Log.",
         ) from e
-    return rec.model_dump()
 

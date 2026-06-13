@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.agents.invoice_agent import analyze_invoice, analyze_invoice_from_text
@@ -43,9 +44,11 @@ async def analyze_invoice_file(
     """
     import uuid
 
-    content = await file.read(settings.max_upload_bytes + 1)
+    content = await file.read(settings.max_invoice_upload_bytes + 1)
     try:
-        storage_service.validate_upload(file.filename or "rechnung", content)
+        storage_service.validate_upload(
+            file.filename or "rechnung", content, max_bytes=settings.max_invoice_upload_bytes
+        )
     except storage_service.StorageError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
@@ -74,6 +77,7 @@ async def analyze_invoice_file(
     return InvoiceAnalysisPreview(
         purchase_date=result.purchase_date,
         amount_eur=result.amount_eur,
+        produkt_name=result.produkt_name,
         notes=result.notes,
     )
 
@@ -93,10 +97,12 @@ async def upload_invoice(
         raise HTTPException(status_code=404, detail="Produkt nicht gefunden")
 
     # Begrenzt einlesen, damit übergroße Uploads nicht komplett im RAM landen;
-    # validate_upload lehnt alles über max_upload_bytes ab.
-    content = await file.read(settings.max_upload_bytes + 1)
+    # validate_upload lehnt alles über dem Rechnungs-Limit ab.
+    content = await file.read(settings.max_invoice_upload_bytes + 1)
     try:
-        storage_service.validate_upload(file.filename or "rechnung", content)
+        storage_service.validate_upload(
+            file.filename or "rechnung", content, max_bytes=settings.max_invoice_upload_bytes
+        )
     except storage_service.StorageError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
@@ -161,21 +167,45 @@ def get_invoice(invoice_id: int, db: Session = Depends(get_db)) -> Invoice:
     return inv
 
 
-@router.delete("/{invoice_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_invoice(invoice_id: int, db: Session = Depends(get_db)) -> None:
-    """Löscht eine Rechnung — nur wenn die Aufbewahrungsfrist abgelaufen ist."""
+@router.get("/{invoice_id}/download")
+def download_invoice(invoice_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    """Liefert die gespeicherte Rechnungsdatei als Download (Originaldateiname)."""
     inv = db.get(Invoice, invoice_id)
     if not inv:
         raise HTTPException(status_code=404, detail="Rechnung nicht gefunden")
 
-    if inv.retain_until > date.today():
+    base = settings.invoices_dir.resolve()
+    path = Path(inv.stored_path).resolve()
+    if not path.is_relative_to(base) or not path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE, detail="Rechnungsdatei nicht mehr vorhanden"
+        )
+    # filename setzt Content-Disposition: attachment — Datei wird heruntergeladen,
+    # nicht im Browser gerendert
+    return FileResponse(path, media_type=inv.mime_type, filename=inv.original_filename)
+
+
+@router.delete("/{invoice_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_invoice(invoice_id: int, force: bool = False, db: Session = Depends(get_db)) -> None:
+    """Löscht eine Rechnung.
+
+    Während der Aufbewahrungsfrist nur mit ?force=true (explizite Bestätigung
+    im Frontend) — z. B. für versehentlich hochgeladene Dateien.
+    """
+    inv = db.get(Invoice, invoice_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Rechnung nicht gefunden")
+
+    if inv.retain_until > date.today() and not force:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
                 f"Aufbewahrungsfrist läuft noch bis {inv.retain_until.isoformat()}. "
-                "Rechnung kann erst danach gelöscht werden."
+                "Zum Löschen trotz Frist die Bestätigung im Lösch-Dialog verwenden."
             ),
         )
+    if force and inv.retain_until > date.today():
+        log.info("Rechnung %d trotz laufender Frist (bis %s) gelöscht", inv.id, inv.retain_until)
 
     base = settings.invoices_dir.resolve()
     try:

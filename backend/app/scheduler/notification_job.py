@@ -14,6 +14,7 @@ from app.models.database import SessionLocal
 from app.models.enums import NOTIFICATION_TRIGGERS_DAYS, PRIORITY_HIGH_DAYS, NotificationStatus
 from app.models.models import Document, Insurance, Notification, Product
 from app.services.pushover_service import PushoverError, send_push
+from app.services.recommendation_service import refresh_stale
 
 log = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
@@ -155,6 +156,25 @@ def _cleanup_orphan_documents() -> None:
         log.error("Orphan-Dokument-Cleanup fehlgeschlagen: %s", e)
 
 
+async def run_recommendation_refresh() -> None:
+    """Wöchentlicher Job: frischt Empfehlungen auf, die älter als ein Jahr sind.
+
+    Bewertet nur fehlende oder >365 Tage alte Empfehlungen neu — die meisten Läufe
+    tun nichts. Braucht OpenAI; ohne Key scheitern die Einzelbewertungen still.
+    """
+    if not settings.openai_api_key:
+        return
+    log.info("Empfehlungs-Auffrischung gestartet")
+    try:
+        with SessionLocal() as db:
+            n = await refresh_stale(db)
+        if n:
+            log.info("Empfehlungen aufgefrischt: %d", n)
+    except Exception as e:  # noqa: BLE001
+        log.error("Empfehlungs-Auffrischung fehlgeschlagen: %s", e)
+    log.info("Empfehlungs-Auffrischung beendet")
+
+
 def run_db_backup() -> None:
     """Monatlicher Job: erstellt ein konsistentes SQLite-Backup im DB-Ordner.
 
@@ -244,6 +264,12 @@ def start_scheduler() -> None:
     _scheduler.add_job(run_notification_job, CronTrigger(hour=8, minute=0), id="daily_notifications")
     # Monatlich am 1. um 02:00 UTC — DB-Backup
     _scheduler.add_job(run_db_backup, CronTrigger(day=1, hour=2, minute=0), id="monthly_db_backup")
+    # Wöchentlich (Mo 03:00) — Empfehlungen auffrischen, die älter als ein Jahr sind
+    _scheduler.add_job(
+        run_recommendation_refresh,
+        CronTrigger(day_of_week="mon", hour=3, minute=0),
+        id="weekly_recommendation_refresh",
+    )
     _scheduler.start()
     log.info("APScheduler gestartet (täglich 08:00)")
 

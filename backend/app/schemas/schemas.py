@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -114,8 +115,28 @@ class ExtractionPreview(BaseModel):
     document_id: int
 
 
+class RecommendationRead(BaseModel):
+    """Gespeicherte KI-Empfehlung inkl. Erstellungsdatum (für 'Stand'-Anzeige)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    handlungsbedarf: str
+    hinweis: str
+    details: str
+    created_at: datetime
+
+
+class ChatMessage(BaseModel):
+    """Eine Nachricht aus dem bisherigen Gesprächsverlauf."""
+
+    rolle: Literal["user", "assistant"]
+    text: str = Field(..., max_length=4000)
+
+
 class ChatRequest(BaseModel):
     frage: str = Field(..., min_length=1, max_length=2000)
+    # Bisheriger Verlauf für Folgefragen — das Frontend schickt die letzten Runden mit
+    verlauf: list[ChatMessage] = Field(default_factory=list, max_length=30)
 
 
 class ChatResponse(BaseModel):
@@ -135,7 +156,15 @@ class InvoiceAnalysisPreview(BaseModel):
 
     purchase_date: date | None = None
     amount_eur: float | None = None
+    produkt_name: str | None = None
     notes: str | None = None
+
+
+class DocumentClassification(BaseModel):
+    """Ergebnis der automatischen Dokumenttyp-Erkennung beim Upload."""
+
+    typ: str  # "versicherung" | "rechnung" | "unbekannt"
+    begruendung: str | None = None
 
 
 class InvoiceRead(InvoiceCreate):

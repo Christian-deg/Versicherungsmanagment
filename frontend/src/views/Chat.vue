@@ -106,15 +106,23 @@ const messagesContainer = ref(null)
 
 const confColor = confidenceColor
 
+// Wie viele bisherige Nachrichten als Kontext mitgeschickt werden
+const HISTORY_LIMIT = 30
+
 async function onSend() {
   const frage = input.value.trim()
   if (!frage) return
+  // Verlauf vor der neuen Frage einfrieren — Fehlermeldungen gehören nicht in den Kontext
+  const verlauf = messages.value
+    .filter((m) => !m.isError)
+    .slice(-HISTORY_LIMIT)
+    .map((m) => ({ rolle: m.role === 'user' ? 'user' : 'assistant', text: m.text }))
   messages.value.push({ role: 'user', text: frage })
   scrollToBottom()
   input.value = ''
   loading.value = true
   try {
-    const res = await chatApi.ask(frage)
+    const res = await chatApi.ask(frage, verlauf)
     messages.value.push({
       role: 'assistant',
       text: res.antwort,
@@ -127,6 +135,7 @@ async function onSend() {
       role: 'assistant',
       text: 'Fehler: ' + (e.response?.data?.detail || e.message),
       konfidenz: 'low',
+      isError: true,
     })
     scrollToBottom()
   } finally {

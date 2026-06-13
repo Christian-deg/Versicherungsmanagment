@@ -159,6 +159,22 @@ def delete_for_document(document_id: int) -> None:
         conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
 
 
+def texts_for_insurance(insurance_id: int, max_chars: int = 4000) -> str:
+    """Gibt den zusammengeführten Dokumentvolltext einer Versicherung zurück (gekürzt).
+
+    Liest alle Chunks dieser Versicherung in Dokument-/Chunk-Reihenfolge — ohne
+    Embedding-Aufruf, rein aus SQLite. Für die inhaltliche Empfehlungs-Bewertung.
+    """
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT text FROM chunks WHERE insurance_id = ? ORDER BY document_id, chunk_index",
+            (insurance_id,),
+        ).fetchall()
+    if not rows:
+        return ""
+    return "\n".join(r[0] for r in rows)[:max_chars]
+
+
 # Statischer OCR-Prompt — außerhalb der Funktion für Prompt-Caching (LLM01)
 _OCR_PROMPT = (
     "Transkribiere den gesamten sichtbaren Text dieser Seite vollständig und wortgetreu. "

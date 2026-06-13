@@ -65,6 +65,20 @@ async def test_search_empty_db_returns_empty(vector_db) -> None:
         assert await embedding_service.search("irgendwas") == []
 
 
+async def test_texts_for_insurance(vector_db) -> None:
+    """Liefert den zusammengeführten Volltext genau einer Versicherung, gekürzt."""
+    with patch.object(embedding_service, "_client", return_value=_fake_openai_client()):
+        await embedding_service.embed_and_store(1, 10, "KFZ Police Selbstbehalt 300 EUR")
+        await embedding_service.embed_and_store(2, 20, "Hausrat Deckung 50000 EUR")
+
+        text = embedding_service.texts_for_insurance(1)
+        assert "KFZ Police" in text
+        assert "Hausrat" not in text  # nur die angefragte Versicherung
+
+        assert embedding_service.texts_for_insurance(999) == ""  # keine Dokumente
+        assert len(embedding_service.texts_for_insurance(1, max_chars=5)) == 5
+
+
 async def test_upsert_replaces_chunks(vector_db) -> None:
     """Erneutes Embedden desselben Dokuments überschreibt statt zu duplizieren."""
     with patch.object(embedding_service, "_client", return_value=_fake_openai_client()):

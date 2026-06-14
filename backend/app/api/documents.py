@@ -272,13 +272,16 @@ async def confirm_extraction(
     if not src.exists():
         raise HTTPException(status_code=410, detail="Quelldatei nicht mehr vorhanden")
     content = src.read_bytes()
-    final_path, _ = storage_service.store_document(
-        content=content,
-        original_filename=doc.original_filename,
-        kategorie=ins.kategorie,
-        versicherer=ins.versicherer,
-        ref_date=ins.start_date,
-    )
+    try:
+        final_path, _ = storage_service.store_document(
+            content=content,
+            original_filename=doc.original_filename,
+            kategorie=ins.kategorie,
+            versicherer=ins.versicherer,
+            ref_date=ins.start_date,
+        )
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     src.unlink(missing_ok=True)
     doc.stored_path = str(final_path)
     doc.insurance_id = ins.id

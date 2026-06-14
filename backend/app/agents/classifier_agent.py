@@ -51,7 +51,7 @@ _classifier_text_agent = Agent(
     name="document-classifier-text",
     instructions=_CLASSIFY_PROMPT,
     model=settings.model_chat,
-    model_settings=ModelSettings(temperature=0, max_tokens=150),
+    model_settings=ModelSettings(max_tokens=150),  # gpt-5.4/5.5 unterstützen kein temperature
     output_type=Klassifikation,
 )
 
@@ -59,7 +59,7 @@ _classifier_vision_agent = Agent(
     name="document-classifier-vision",
     instructions=_CLASSIFY_PROMPT,
     model=settings.model_chat,
-    model_settings=ModelSettings(temperature=0, max_tokens=150),
+    model_settings=ModelSettings(max_tokens=150),  # gpt-5.4/5.5 unterstützen kein temperature
     output_type=Klassifikation,
 )
 

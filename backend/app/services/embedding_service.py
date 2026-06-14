@@ -39,6 +39,9 @@ def _connect() -> sqlite3.Connection:
     """Öffnet die Vektor-DB und stellt das Schema sicher (eine Datei in vectordb_dir)."""
     settings.vectordb_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(settings.vectordb_dir / _DB_FILENAME)
+    # Bis zu 5 s auf eine gehaltene Sperre warten, statt sofort "database is locked"
+    # zu werfen (gleichzeitiges Embedding-Schreiben + Empfehlungs-Lesen).
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS chunks (

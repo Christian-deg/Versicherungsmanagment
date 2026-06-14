@@ -57,7 +57,7 @@ _invoice_vision_agent = Agent(
     name="invoice-analysis-vision",
     instructions=_INVOICE_PROMPT,
     model=settings.model_chat,
-    model_settings=ModelSettings(temperature=0, max_tokens=200),
+    model_settings=ModelSettings(max_tokens=200),  # gpt-5.4/5.5 unterstützen kein temperature
     output_type=InvoiceExtraction,
     input_guardrails=[],  # Vision-Input — kein Text-Injection-Check notwendig
     output_guardrails=[OutputGuardrail(guardrail_function=_invoice_output_guardrail)],
@@ -67,7 +67,7 @@ _invoice_text_agent = Agent(
     name="invoice-analysis-text",
     instructions=_INVOICE_PROMPT,
     model=settings.model_chat,
-    model_settings=ModelSettings(temperature=0, max_tokens=200),
+    model_settings=ModelSettings(max_tokens=200),  # gpt-5.4/5.5 unterstützen kein temperature
     output_type=InvoiceExtraction,
     output_guardrails=[OutputGuardrail(guardrail_function=_invoice_output_guardrail)],
 )

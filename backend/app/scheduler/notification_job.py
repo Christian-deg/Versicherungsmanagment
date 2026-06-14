@@ -55,27 +55,75 @@ def _ensure_notification(
     return n
 
 
+def _bucket_for(days_until: int) -> int | None:
+    """Liefert die engste passende Warnstufe (z.B. 90/30/7) für die Resttage, sonst None.
+
+    days_until=50 → 90 (Band 30<d≤90), days_until=5 → 7, days_until=0 → 7 (heute),
+    days_until>90 → None (noch zu früh), days_until<0 → None (bereits abgelaufen).
+    """
+    if days_until < 0:
+        return None
+    for threshold in sorted(NOTIFICATION_TRIGGERS_DAYS):
+        if days_until <= threshold:
+            return threshold
+    return None
+
+
+def _days_phrase(days: int) -> str:
+    if days <= 0:
+        return "heute"
+    if days == 1:
+        return "morgen"
+    return f"in {days} Tagen"
+
+
 def _build_pending(db: Session) -> None:
-    """Erzeugt fehlende Notification-Einträge für alle relevanten Versicherungen/Produkte."""
+    """Erzeugt fehlende Notification-Einträge für alle relevanten Versicherungen/Produkte.
+
+    Jede Versicherung/Garantie wird genau einer Warnstufe (90/30/7 Tage) zugeordnet —
+    der engsten, die noch zutrifft. Die Notification ist sofort fällig
+    (trigger_date=heute), und die Deduplizierung in _ensure_notification verhindert
+    Doppel-Versand. Durch die Band-Logik (statt exaktem Datumsabgleich) geht keine
+    Warnung verloren, falls der tägliche Job einmal ausfällt.
+    """
     today = date.today()
-    for days in NOTIFICATION_TRIGGERS_DAYS:
-        target = today + timedelta(days=days)
+    horizon = today + timedelta(days=max(NOTIFICATION_TRIGGERS_DAYS))
 
-        # Versicherungen
-        for ins in db.query(Insurance).filter(Insurance.end_date == target).all():
-            msg = (
-                f"Versicherung '{ins.name}' ({ins.versicherer}, {ins.kategorie.value}) "
-                f"läuft in {days} Tagen ab ({ins.end_date.isoformat()})."
-            )
-            _ensure_notification(db, "insurance", ins.id, days, target, msg)
+    # Versicherungen
+    for ins in (
+        db.query(Insurance)
+        .filter(Insurance.end_date.isnot(None), Insurance.end_date >= today, Insurance.end_date <= horizon)
+        .all()
+    ):
+        days_until = (ins.end_date - today).days
+        bucket = _bucket_for(days_until)
+        if bucket is None:
+            continue
+        msg = (
+            f"Versicherung '{ins.name}' ({ins.versicherer}, {ins.kategorie.value}) "
+            f"läuft {_days_phrase(days_until)} ab ({ins.end_date.isoformat()})."
+        )
+        _ensure_notification(db, "insurance", ins.id, bucket, today, msg)
 
-        # Produkte (Garantie)
-        for p in db.query(Product).filter(Product.warranty_end == target).all():
-            msg = (
-                f"Garantie für '{p.name}' ({p.kategorie}) "
-                f"endet in {days} Tagen ({p.warranty_end.isoformat()})."
-            )
-            _ensure_notification(db, "product", p.id, days, target, msg)
+    # Produkte (Garantie)
+    for p in (
+        db.query(Product)
+        .filter(
+            Product.warranty_end.isnot(None),
+            Product.warranty_end >= today,
+            Product.warranty_end <= horizon,
+        )
+        .all()
+    ):
+        days_until = (p.warranty_end - today).days
+        bucket = _bucket_for(days_until)
+        if bucket is None:
+            continue
+        msg = (
+            f"Garantie für '{p.name}' ({p.kategorie}) "
+            f"endet {_days_phrase(days_until)} ({p.warranty_end.isoformat()})."
+        )
+        _ensure_notification(db, "product", p.id, bucket, today, msg)
 
     db.commit()
 

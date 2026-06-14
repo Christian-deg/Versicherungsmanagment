@@ -38,7 +38,9 @@ class InsuranceBase(BaseModel):
     notes: str | None = Field(None, max_length=2000)
 
     @model_validator(mode="after")
-    def _check_kuendigung_paare(self) -> InsuranceBase:
+    def _check_dates(self) -> InsuranceBase:
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("start_date darf nicht nach end_date liegen")
         _validate_recurring_date(self.kuendigung_bis_tag, self.kuendigung_bis_monat, "kuendigung_bis")
         _validate_recurring_date(self.kuendigung_zum_tag, self.kuendigung_zum_monat, "kuendigung_zum")
         return self

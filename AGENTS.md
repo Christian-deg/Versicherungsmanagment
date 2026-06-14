@@ -11,7 +11,7 @@ mit KI-gestützter Dokumentenanalyse, RAG-basiertem Chat-Assistenten und Push-Be
 | **Hosting** | Self-hosted via Docker Compose |
 | **Frontend** | Vue.js 3 + Vuetify 3 (Desktop + Mobile responsive) |
 | **Backend** | Python 3.13 + FastAPI + OpenAI Agents SDK |
-| **Strukturierte DB** | SQLite (SQLAlchemy + Alembic) |
+| **Strukturierte DB** | SQLite (SQLAlchemy, leichte In-Code-Migrationen) |
 | **Vektor-DB** | SQLite-Vektorstore (lokal, numpy-Cosine) |
 | **Notifications** | Pushover API (Push aufs Handy) |
 | **Package-Manager** | uv |
@@ -66,7 +66,10 @@ Unfall, Rechtsschutz, Leben, Reise, Tier, Sonstige
 ## Agenten
 
 Alle Agenten folgen den Regeln aus `.claude/skills/agentic-systems/SKILL.md`:
-- `temperature=0`, `max_tokens` explizit gesetzt
+- `max_tokens` explizit gesetzt. **Hinweis:** Die Modelle `gpt-5.4`/`gpt-5.5`
+  unterstützen den `temperature`-Parameter nicht mehr — er darf NICHT gesetzt
+  werden (führt sonst zu fehlgeschlagenen API-Aufrufen). Determinismus kommt
+  über `output_type` + strikte System-Prompts, nicht über `temperature`.
 - Pydantic `output_type` zwingend
 - Input-/Output-Guardrails (Allowlist + Sensitive-Info-Check auf Freitext-Feldern)
 - Nutzerdaten als separater `<eingabe>`-Block, nie im System-Prompt

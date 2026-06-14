@@ -237,9 +237,11 @@ async def analyze_document(images_png: list[bytes], filename: str) -> Versicheru
         run = await Runner.run(document_agent, input=vision_input)
         last_result = run.final_output_as(VersicherungsExtraktion)
 
-        # Evaluator nur mit JSON-Repräsentation (keine Bilder, spart Tokens)
+        # Evaluator nur mit JSON-Repräsentation (keine Bilder, spart Tokens).
+        # Dateiname sanitieren — sonst kann ein injection-artiger Name den
+        # Input-Guardrail des Evaluators auslösen und die Analyse fälschlich abbrechen.
         eval_input = (
-            f"Dateiname: {filename}\n"
+            f"Dateiname: {_sanitize_filename(filename)}\n"
             f"Extraktionsergebnis (JSON): {last_result.model_dump_json()}"
         )
         eval_run = await Runner.run(document_evaluator, input=eval_input)

@@ -16,16 +16,29 @@ import sqlite3
 from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import anyio.to_thread
 import numpy as np
 from openai import AsyncOpenAI
 
 from app.config import settings
 
+if TYPE_CHECKING:
+    from app.models.models import Insurance
+
 log = logging.getLogger(__name__)
 
 CHUNK_SIZE_CHARS = 2000  # ~500 Tokens
 CHUNK_OVERLAP = 200
+
+# Trennt den Metadaten-Block vom Dokumentvolltext im embeddeten Text —
+# wird beim Metadaten-Refresh zum Aufsplitten wiederverwendet.
+FULLTEXT_SEPARATOR = "\n\n--- Dokumentvolltext ---\n\n"
+
+# Obergrenze für den eingebetteten Volltext je Dokument (Kosten-/Speicherschutz:
+# ein präpariertes PDF mit riesigem Textlayer soll keine tausenden Embedding-Chunks erzeugen)
+MAX_FULLTEXT_CHARS = 200_000
 
 _DB_FILENAME = "vectors.sqlite"
 
@@ -74,6 +87,19 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
+def _store_rows_sync(document_id: int, rows: list[tuple]) -> None:
+    """Ersetzt alle Chunks eines Dokuments atomar (verhindert Chunk-Leichen,
+    wenn der neue Text weniger Chunks ergibt als der alte)."""
+    # closing() schließt die Verbindung; das innere `conn` committet die Transaktion
+    with closing(_connect()) as conn, conn:
+        conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+        conn.executemany(
+            "INSERT INTO chunks (id, insurance_id, document_id, chunk_index, text, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+
 async def embed_and_store(
     insurance_id: int,
     document_id: int,
@@ -101,24 +127,14 @@ async def embed_and_store(
         )
         for i, (chunk, vec) in enumerate(zip(chunks, embeddings, strict=True))
     ]
-    # closing() schließt die Verbindung; das innere `conn` committet die Transaktion
-    with closing(_connect()) as conn, conn:
-        conn.executemany(
-            "INSERT OR REPLACE INTO chunks (id, insurance_id, document_id, chunk_index, text, embedding) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            rows,
-        )
+    # SQLite-Schreibzugriff blockiert — im Thread ausführen, nicht auf dem Event-Loop
+    await anyio.to_thread.run_sync(_store_rows_sync, document_id, rows)
     log.info("Embedded %d Chunks für Dokument %d (insurance=%d)", len(chunks), document_id, insurance_id)
     return len(chunks)
 
 
-async def search(query: str, n_results: int = 5) -> list[dict]:
-    """Embedded eine Frage und sucht die ähnlichsten Chunks (Cosine-Distanz)."""
-    if not query.strip():
-        return []
-    resp = await _client().embeddings.create(model=settings.model_embedding, input=[query])
-    qvec = np.asarray(resp.data[0].embedding, dtype=np.float32)
-
+def _search_sync(qvec: np.ndarray, n_results: int) -> list[dict]:
+    """Brute-Force-Cosine-Suche (blockierend — wird via Thread aufgerufen)."""
     with closing(_connect()) as conn:
         rows = conn.execute(
             "SELECT insurance_id, document_id, chunk_index, text, embedding FROM chunks"
@@ -156,10 +172,26 @@ async def search(query: str, n_results: int = 5) -> list[dict]:
     ]
 
 
+async def search(query: str, n_results: int = 5) -> list[dict]:
+    """Embedded eine Frage und sucht die ähnlichsten Chunks (Cosine-Distanz)."""
+    if not query.strip():
+        return []
+    resp = await _client().embeddings.create(model=settings.model_embedding, input=[query])
+    qvec = np.asarray(resp.data[0].embedding, dtype=np.float32)
+    return await anyio.to_thread.run_sync(_search_sync, qvec, n_results)
+
+
 def delete_for_document(document_id: int) -> None:
     """Entfernt alle Chunks zu einem Dokument."""
     with closing(_connect()) as conn, conn:
         conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+
+
+def existing_document_ids() -> set[int]:
+    """IDs aller Dokumente, die im Vektorindex vertreten sind (für den Konsistenz-Check)."""
+    with closing(_connect()) as conn:
+        rows = conn.execute("SELECT DISTINCT document_id FROM chunks").fetchall()
+    return {r[0] for r in rows}
 
 
 def texts_for_insurance(insurance_id: int, max_chars: int = 4000) -> str:
@@ -176,6 +208,67 @@ def texts_for_insurance(insurance_id: int, max_chars: int = 4000) -> str:
     if not rows:
         return ""
     return "\n".join(r[0] for r in rows)[:max_chars]
+
+
+def build_insurance_metadata(ins: Insurance, ai_summary: str | None = None) -> str:
+    """Erzeugt den Metadaten-Block für RAG (gemeinsam für Upload, Attach und Refresh)."""
+    if ins.kuendigung_bis_tag and ins.kuendigung_bis_monat:
+        kuendigung = f"jährlich kündbar bis {ins.kuendigung_bis_tag:02d}.{ins.kuendigung_bis_monat:02d}."
+        if ins.kuendigung_zum_tag and ins.kuendigung_zum_monat:
+            zum = f"{ins.kuendigung_zum_tag:02d}.{ins.kuendigung_zum_monat:02d}."
+            kuendigung += f", Vertrag endet dann zum {zum}"
+    else:
+        kuendigung = "nicht angegeben"
+    text = (
+        f"Versicherung: {ins.name}\nKategorie: {ins.kategorie.value}\n"
+        f"Gehört zu: {ins.person or 'nicht zugeordnet'}\n"
+        f"Versicherer: {ins.versicherer}\nVertragsnummer: {ins.vertragsnummer}\n"
+        f"Laufzeit: {ins.start_date} bis {ins.end_date}\n"
+        f"Prämie: {ins.praemie_eur} EUR ({ins.zahlungsintervall.value})\n"
+        f"Kündigung: {kuendigung}\n"
+        f"Notizen: {ins.notes or ''}"
+    )
+    if ai_summary:
+        text += f"\nKI-Hinweise: {ai_summary}"
+    return text
+
+
+def _reconstruct_document_text(document_id: int) -> str:
+    """Setzt den ursprünglich embeddeten Text eines Dokuments exakt aus den Chunks zusammen.
+
+    Möglich, weil chunk_text mit festem CHUNK_OVERLAP arbeitet: jeder Folge-Chunk
+    beginnt mit den letzten CHUNK_OVERLAP Zeichen des Vorgängers.
+    """
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT text FROM chunks WHERE document_id = ? ORDER BY chunk_index",
+            (document_id,),
+        ).fetchall()
+    if not rows:
+        return ""
+    parts = [rows[0][0]]
+    parts.extend(r[0][CHUNK_OVERLAP:] for r in rows[1:])
+    return "".join(parts)
+
+
+async def refresh_insurance_metadata(insurance_id: int, documents: list[tuple[int, str]]) -> None:
+    """Embedded die Dokumente einer Versicherung mit aktualisiertem Metadaten-Block neu.
+
+    documents: Liste von (document_id, neuer_metadaten_block)-Paaren — die Texte
+    werden vom Aufrufer bei offener DB-Session gebaut (dieser Task läuft nach der
+    Response, wenn die ORM-Objekte detached sind).
+    Der bereits extrahierte Dokumentvolltext bleibt erhalten (kein erneutes OCR nötig).
+    """
+    for doc_id, base_text in documents:
+        old_text = await anyio.to_thread.run_sync(_reconstruct_document_text, doc_id)
+        _, sep, fulltext = old_text.partition(FULLTEXT_SEPARATOR)
+        new_text = base_text
+        if sep:
+            new_text += FULLTEXT_SEPARATOR + fulltext
+        try:
+            await embed_and_store(insurance_id, doc_id, new_text)
+        except Exception:  # noqa: BLE001
+            log.exception("Metadaten-Refresh fehlgeschlagen für Dokument %d", doc_id)
 
 
 # Statischer OCR-Prompt — außerhalb der Funktion für Prompt-Caching (LLM01)
@@ -196,7 +289,8 @@ async def ocr_document_text(stored_path: str) -> str:
     from app.services.storage_service import StorageError, read_document_image_bytes
 
     try:
-        images = read_document_image_bytes(stored_path)
+        # PDF-Rendering ist CPU-lastig — nicht auf dem Event-Loop ausführen
+        images = await anyio.to_thread.run_sync(read_document_image_bytes, stored_path)
     except StorageError as e:
         log.warning("Vision-OCR: Dokument nicht lesbar (%s): %s", Path(stored_path).name, e)
         return ""

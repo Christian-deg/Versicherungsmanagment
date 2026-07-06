@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from calendar import monthrange
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -11,7 +12,12 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.database import SessionLocal
-from app.models.enums import NOTIFICATION_TRIGGERS_DAYS, PRIORITY_HIGH_DAYS, NotificationStatus
+from app.models.enums import (
+    CANCELLATION_TRIGGERS_DAYS,
+    NOTIFICATION_TRIGGERS_DAYS,
+    PRIORITY_HIGH_DAYS,
+    NotificationStatus,
+)
 from app.models.models import Document, Insurance, Notification, Product
 from app.services.pushover_service import PushoverError, send_push
 from app.services.recommendation_service import refresh_stale
@@ -30,14 +36,22 @@ def _ensure_notification(
     days_before: int,
     trigger_date: date,
     message: str,
+    target_date: date,
 ) -> Notification | None:
-    """Legt eine Notification an, falls für (ref_type, ref_id, days_before) noch nicht vorhanden."""
+    """Legt eine Notification an, falls für (ref_type, ref_id, days_before, target_date)
+    noch nicht vorhanden.
+
+    target_date (das Ablaufdatum, auf das sich die Warnung bezieht) gehört zum
+    Dedup-Schlüssel: Wird ein Vertrag verlängert (neues end_date), startet damit
+    ein neuer Warnzyklus, statt für immer stumm zu bleiben.
+    """
     existing = (
         db.query(Notification)
         .filter(
             Notification.ref_type == ref_type,
             Notification.ref_id == ref_id,
             Notification.days_before == days_before,
+            Notification.target_date == target_date,
         )
         .first()
     )
@@ -47,6 +61,7 @@ def _ensure_notification(
         ref_type=ref_type,
         ref_id=ref_id,
         days_before=days_before,
+        target_date=target_date,
         trigger_date=trigger_date,
         message=message,
         status=NotificationStatus.PENDING,
@@ -55,7 +70,7 @@ def _ensure_notification(
     return n
 
 
-def _bucket_for(days_until: int) -> int | None:
+def _bucket_for(days_until: int, thresholds: tuple[int, ...] = NOTIFICATION_TRIGGERS_DAYS) -> int | None:
     """Liefert die engste passende Warnstufe (z.B. 90/30/7) für die Resttage, sonst None.
 
     days_until=50 → 90 (Band 30<d≤90), days_until=5 → 7, days_until=0 → 7 (heute),
@@ -63,10 +78,31 @@ def _bucket_for(days_until: int) -> int | None:
     """
     if days_until < 0:
         return None
-    for threshold in sorted(NOTIFICATION_TRIGGERS_DAYS):
+    for threshold in sorted(thresholds):
         if days_until <= threshold:
             return threshold
     return None
+
+
+def next_recurring_date(tag: int, monat: int, today: date) -> date:
+    """Nächstes Vorkommen eines wiederkehrenden Datums (TT.MM.) ab heute (einschließlich).
+
+    Ungültige Kombinationen (z.B. 29.02. in Nicht-Schaltjahren) werden auf den
+    letzten Tag des Monats geklemmt.
+    """
+    for year in (today.year, today.year + 1):
+        d = date(year, monat, min(tag, monthrange(year, monat)[1]))
+        if d >= today:
+            return d
+    # Unerreichbar (das Folgejahr liegt immer in der Zukunft) — defensiv
+    return date(today.year + 1, monat, min(tag, monthrange(today.year + 1, monat)[1]))
+
+
+def _cancellation_deadline(ins: Insurance, today: date) -> date | None:
+    """Nächste Kündigungs-Deadline einer Versicherung, oder None ohne Kündigungsdaten."""
+    if not ins.kuendigung_bis_tag or not ins.kuendigung_bis_monat:
+        return None
+    return next_recurring_date(ins.kuendigung_bis_tag, ins.kuendigung_bis_monat, today)
 
 
 def _days_phrase(days: int) -> str:
@@ -103,15 +139,16 @@ def _build_pending(db: Session) -> None:
             f"Versicherung '{ins.name}' ({ins.versicherer}, {ins.kategorie.value}) "
             f"läuft {_days_phrase(days_until)} ab ({ins.end_date.isoformat()})."
         )
-        _ensure_notification(db, "insurance", ins.id, bucket, today, msg)
+        _ensure_notification(db, "insurance", ins.id, bucket, today, msg, target_date=ins.end_date)
 
-    # Produkte (Garantie)
+    # Produkte (Garantie) — archivierte (verkauft/entsorgt) brauchen keine Warnung mehr
     for p in (
         db.query(Product)
         .filter(
             Product.warranty_end.isnot(None),
             Product.warranty_end >= today,
             Product.warranty_end <= horizon,
+            Product.archived.is_(False),
         )
         .all()
     ):
@@ -123,29 +160,94 @@ def _build_pending(db: Session) -> None:
             f"Garantie für '{p.name}' ({p.kategorie}) "
             f"endet {_days_phrase(days_until)} ({p.warranty_end.isoformat()})."
         )
-        _ensure_notification(db, "product", p.id, bucket, today, msg)
+        _ensure_notification(db, "product", p.id, bucket, today, msg, target_date=p.warranty_end)
+
+    # Kündigungsfristen ("kündbar bis", jährlich wiederkehrend) — 30/7 Tage vorher.
+    # target_date ist die konkrete Deadline dieses Jahres, dadurch startet im
+    # Folgejahr automatisch ein neuer Warnzyklus.
+    for ins in (
+        db.query(Insurance)
+        .filter(Insurance.kuendigung_bis_tag.isnot(None), Insurance.kuendigung_bis_monat.isnot(None))
+        .all()
+    ):
+        deadline = _cancellation_deadline(ins, today)
+        if deadline is None:
+            continue
+        days_until = (deadline - today).days
+        bucket = _bucket_for(days_until, CANCELLATION_TRIGGERS_DAYS)
+        if bucket is None:
+            continue
+        msg = (
+            f"Kündigungsfrist für '{ins.name}' ({ins.versicherer}) endet "
+            f"{_days_phrase(days_until)} — kündbar bis {deadline.isoformat()}."
+        )
+        if ins.kuendigung_zum_tag and ins.kuendigung_zum_monat:
+            msg += f" Vertrag endet dann zum {ins.kuendigung_zum_tag:02d}.{ins.kuendigung_zum_monat:02d}."
+        _ensure_notification(db, "insurance_cancellation", ins.id, bucket, today, msg, target_date=deadline)
 
     db.commit()
 
 
+# FAILED-Notifications werden so viele Tage nach trigger_date erneut versucht —
+# ein vorübergehender Pushover-Ausfall darf eine Warnung nicht dauerhaft verschlucken.
+_RETRY_FAILED_DAYS = 3
+
+
+def _is_stale(db: Session, n: Notification) -> bool:
+    """True, wenn die Warnung auf einen gelöschten Eintrag oder ein inzwischen
+    geändertes Ablaufdatum verweist (z.B. Vertrag verlängert vor dem Versand)."""
+    if n.ref_type == "insurance":
+        ins = db.get(Insurance, n.ref_id)
+        return ins is None or ins.end_date != n.target_date
+    if n.ref_type == "product":
+        p = db.get(Product, n.ref_id)
+        return p is None or p.archived or p.warranty_end != n.target_date
+    if n.ref_type == "insurance_cancellation":
+        ins = db.get(Insurance, n.ref_id)
+        if ins is None:
+            return True
+        # Kündigungsdaten entfernt/geändert oder Deadline bereits vorbei → verwerfen
+        return _cancellation_deadline(ins, date.today()) != n.target_date
+    return False
+
+
 async def _send_due(db: Session) -> None:
-    """Sendet alle PENDING-Notifications, deren trigger_date <= heute."""
+    """Sendet alle fälligen Notifications (trigger_date <= heute).
+
+    - PENDING wird versendet; veraltete Einträge (Vertrag gelöscht/verlängert)
+      werden stattdessen entfernt.
+    - FAILED wird bis zu _RETRY_FAILED_DAYS Tage nach trigger_date erneut versucht.
+    """
     today = date.today()
+    retry_cutoff = today - timedelta(days=_RETRY_FAILED_DAYS)
     due = (
         db.query(Notification)
         .filter(
-            Notification.status == NotificationStatus.PENDING,
             Notification.trigger_date <= today,
+            (Notification.status == NotificationStatus.PENDING)
+            | (
+                (Notification.status == NotificationStatus.FAILED)
+                & (Notification.trigger_date >= retry_cutoff)
+            ),
         )
         .all()
     )
     for n in due:
+        if _is_stale(db, n):
+            log.info("Veraltete Notification entfernt (id=%d, %s=%d)", n.id, n.ref_type, n.ref_id)
+            db.delete(n)
+            continue
         priority = 1 if n.days_before <= PRIORITY_HIGH_DAYS else 0
-        title = "⚠ Versicherung läuft ab" if n.ref_type == "insurance" else "⚠ Garantie endet"
+        title = {
+            "insurance": "⚠ Versicherung läuft ab",
+            "product": "⚠ Garantie endet",
+            "insurance_cancellation": "⏰ Kündigungsfrist beachten",
+        }.get(n.ref_type, "⚠ Erinnerung")
         try:
             await send_push(title=title, message=n.message, priority=priority)
             n.status = NotificationStatus.SENT
             n.sent_at = datetime.now(UTC)
+            n.error = None
         except PushoverError as e:
             log.error("Pushover-Versand fehlgeschlagen: %s", e)
             n.status = NotificationStatus.FAILED

@@ -1,3 +1,29 @@
+import { ref, watch } from 'vue'
+import { intervalsPerYear } from './constants'
+
+/**
+ * Ref, deren Wert in localStorage überlebt (z.B. Statusfilter je Ansicht).
+ * Fällt bei Speicherfehlern still auf den Default zurück.
+ */
+export function persistedRef(key, defaultValue) {
+  let initial = defaultValue
+  try {
+    const raw = localStorage.getItem(key)
+    if (raw != null) initial = JSON.parse(raw)
+  } catch {
+    /* defekter Eintrag → Default */
+  }
+  const r = ref(initial)
+  watch(r, (v) => {
+    try {
+      localStorage.setItem(key, JSON.stringify(v))
+    } catch {
+      /* Speicher voll o.ä. — Persistenz ist nur Komfort */
+    }
+  })
+  return r
+}
+
 export const parseDateValue = (value) => {
   if (!value) return null
   if (value instanceof Date) return value
@@ -46,6 +72,72 @@ export const daysLabel = (value, options = {}) => {
 
 export const confidenceColor = (value) =>
   ({ high: 'success', medium: 'warning', low: 'error' })[value?.toLowerCase?.()] || 'grey'
+
+// Jahresprämie einer Versicherung (praemie_eur ist der Betrag je Zahlung), null wenn unbekannt
+export const yearlyPremium = (item) =>
+  item?.praemie_eur == null ? null : item.praemie_eur * (intervalsPerYear[item.zahlungsintervall] ?? 1)
+
+/**
+ * Prämien-Trend aus dem Verlauf einer Versicherung (chronologische Einträge).
+ * Rückgabe: { pct, sinceYear, firstYearly, lastYearly } oder null (kein/zu wenig Verlauf).
+ */
+export function premiumTrend(rows) {
+  if (!rows || rows.length < 2) return null
+  const yearly = (r) =>
+    r.praemie_eur == null ? null : r.praemie_eur * (intervalsPerYear[r.zahlungsintervall] ?? 1)
+  const first = yearly(rows[0])
+  const last = yearly(rows[rows.length - 1])
+  if (!first || last == null) return null
+  const pct = Math.round(((last - first) / first) * 100)
+  if (pct === 0) return null
+  return {
+    pct,
+    sinceYear: new Date(rows[0].changed_at).getFullYear(),
+    firstYearly: first,
+    lastYearly: last,
+  }
+}
+
+/**
+ * Datenqualitäts-Check je Vertrag: liefert Hinweise auf Lücken, durch die
+ * Erinnerungen oder Auswertungen ins Leere laufen würden.
+ * Bewusst nicht "kein Enddatum" allein bemängeln — bei sich jährlich
+ * verlängernden Verträgen ist die Kündigungsfrist der relevante Termin.
+ */
+export function qualityIssues(item, hasDocuments = true) {
+  const issues = []
+  const hatKuendigung = Boolean(item.kuendigung_bis_tag && item.kuendigung_bis_monat)
+  if (!item.end_date && !hatKuendigung) {
+    issues.push('Keine Frist hinterlegt (Enddatum oder Kündigungsfrist) — es können keine Erinnerungen gesendet werden')
+  }
+  if (item.praemie_eur == null) {
+    issues.push('Keine Prämie hinterlegt — fehlt in der Kostenübersicht')
+  }
+  if (!hasDocuments) {
+    issues.push('Kein Dokument hinterlegt — für den Assistenten nicht auffindbar')
+  }
+  return issues
+}
+
+/**
+ * Datenqualitäts-Check je Produkt. Wichtigster Fall: fehlender Kaufbeleg —
+ * im Garantiefall ist er der Anspruchsnachweis. Archivierte Produkte werden
+ * nicht bemängelt.
+ */
+export function productQualityIssues(product, hasInvoices = true) {
+  if (product.archived) return []
+  const issues = []
+  if (!hasInvoices) {
+    issues.push('Kein Kaufbeleg hinterlegt — im Garantiefall fehlt der Nachweis')
+  }
+  if (!product.warranty_end && !product.linked_insurance_id) {
+    issues.push('Kein Garantieende hinterlegt — es können keine Erinnerungen gesendet werden')
+  }
+  if (!product.purchase_date) {
+    issues.push('Kein Kaufdatum hinterlegt')
+  }
+  return issues
+}
 
 const MAX_TAG_IM_MONAT = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 

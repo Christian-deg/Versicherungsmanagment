@@ -79,6 +79,14 @@
           </span>
           <v-spacer />
           <v-btn
+            icon="mdi-open-in-new"
+            size="small"
+            variant="text"
+            aria-label="Beleg ansehen"
+            :href="`/api/invoices/${item.id}/file`"
+            target="_blank"
+          />
+          <v-btn
             icon="mdi-download"
             size="small"
             variant="text"
@@ -112,6 +120,18 @@
         </v-chip>
       </template>
       <template #item.actions="{ item }">
+        <v-tooltip text="Im Browser ansehen" location="top">
+          <template #activator="{ props }">
+            <v-btn
+              v-bind="props"
+              icon="mdi-open-in-new"
+              size="small"
+              variant="text"
+              :href="`/api/invoices/${item.id}/file`"
+              target="_blank"
+            />
+          </template>
+        </v-tooltip>
         <v-tooltip text="Herunterladen" location="top">
           <template #activator="{ props }">
             <v-btn
@@ -171,6 +191,25 @@
             prepend-icon="mdi-paperclip"
             hint="Bis 10 MB"
             persistent-hint
+          />
+          <!-- Mobil: Kassenzettel direkt abfotografieren -->
+          <v-btn
+            v-if="smAndDown"
+            variant="outlined"
+            prepend-icon="mdi-camera"
+            class="mt-3"
+            block
+            @click="cameraInput?.click()"
+          >
+            Mit Kamera aufnehmen
+          </v-btn>
+          <input
+            ref="cameraInput"
+            type="file"
+            accept="image/*"
+            capture="environment"
+            class="d-none"
+            @change="onCameraCapture"
           />
         </v-card-text>
         <v-card-actions v-if="uploadStep === 1">
@@ -288,7 +327,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from 'vuetify'
 import { invoicesApi, productsApi } from '../api'
 import { useTransferStore } from '../stores/transfer'
-import { formatDate, formatCurrency, daysUntil } from '../utils'
+import { formatDate, formatCurrency, daysUntil, persistedRef } from '../utils'
 
 const transfer = useTransferStore()
 
@@ -300,7 +339,8 @@ const items = ref([])
 const products = ref([])
 const initialLoading = ref(true)
 const search = ref('')
-const retainFilter = ref('all')
+// Filterwahl überlebt Seitenwechsel und Neustarts
+const retainFilter = persistedRef('versicherung-filter-invoices', 'all')
 const productFilter = ref(null)
 const uploadDialog = ref(false)
 const deleteDialog = ref(false)
@@ -314,6 +354,15 @@ const productMode = ref('existing')  // 'existing' | 'new'
 const newProduct = ref({ name: '', kategorie: '', warranty_end: '' })
 
 const form = ref({ product_id: null, file: null, purchase_date: '', amount_eur: '', notes: '' })
+
+// Mobil: verstecktes Kamera-Input (capture="environment" öffnet direkt die Rückkamera)
+const cameraInput = ref(null)
+
+function onCameraCapture(event) {
+  const foto = event.target.files?.[0]
+  if (foto) form.value.file = [foto]
+  event.target.value = ''
+}
 
 const deleteNeedsForce = computed(
   () => deleteTarget.value && !canDelete(deleteTarget.value.retain_until)
@@ -445,6 +494,18 @@ async function doAnalyze() {
     // KI-Vorschlag für die Direkt-Anlage eines neuen Produkts übernehmen
     if (result.produkt_name && !newProduct.value.name) {
       newProduct.value.name = result.produkt_name
+    }
+    // Auf dem Beleg genannte Garantiedauer → Garantieende vorbefüllen
+    // (z.B. "3 Jahre Herstellergarantie" statt pauschal +2 Jahre)
+    if (result.garantie_monate && result.purchase_date && !newProduct.value.warranty_end) {
+      const end = new Date(result.purchase_date)
+      end.setMonth(end.getMonth() + result.garantie_monate)
+      newProduct.value.warranty_end = end.toISOString().slice(0, 10)
+      snack.value = {
+        show: true,
+        color: 'info',
+        text: `Beleg nennt ${result.garantie_monate} Monate Garantie — Garantieende vorbefüllt.`,
+      }
     }
     uploadStep.value = 2
   } catch (e) {

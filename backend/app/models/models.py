@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,6 +22,9 @@ class Insurance(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     kategorie: Mapped[Kategorie] = mapped_column(SAEnum(Kategorie), nullable=False)
+    # Familien-Zuordnung ("gehört zu"): freies Label wie "Christian" — bewusst
+    # keine Benutzerverwaltung, nur ein Filter-/Anzeige-Feld
+    person: Mapped[str | None] = mapped_column(String(100), nullable=True)
     versicherer: Mapped[str] = mapped_column(String(100), nullable=False)
     vertragsnummer: Mapped[str] = mapped_column(String(50), nullable=False)
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
@@ -67,9 +70,14 @@ class Product(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     kategorie: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Für Garantiefälle: Seriennummer des Geräts (optional)
+    seriennummer: Mapped[str | None] = mapped_column(String(100), nullable=True)
     purchase_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     warranty_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     linked_insurance_id: Mapped[int | None] = mapped_column(ForeignKey("insurances.id"), nullable=True)
+    # Archiviert = verkauft/entsorgt: raus aus aktiven Listen, Ampel und Warnungen —
+    # Belege bleiben aber bis zum Ende ihrer Aufbewahrungsfrist erhalten
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
@@ -106,6 +114,10 @@ class Notification(Base):
     ref_type: Mapped[str] = mapped_column(String(20), nullable=False)  # "insurance" | "product"
     ref_id: Mapped[int] = mapped_column(Integer, nullable=False)
     days_before: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Das Ablaufdatum (end_date/warranty_end), auf das sich die Warnung bezieht.
+    # Teil der Deduplizierung: nach einer Vertragsverlängerung (neues Enddatum)
+    # muss ein neuer Warnzyklus starten.
+    target_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     trigger_date: Mapped[date] = mapped_column(Date, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[NotificationStatus] = mapped_column(
@@ -113,6 +125,25 @@ class Notification(Base):
     )
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PremiumHistory(Base):
+    """Prämienverlauf je Versicherung — macht Beitragserhöhungen sichtbar.
+
+    Bei Anlage wird der Startwert erfasst; bei jeder Änderung von Prämie oder
+    Zahlungsintervall kommt ein neuer Eintrag hinzu (alte Werte bleiben erhalten).
+    """
+
+    __tablename__ = "premium_history"
+    __table_args__ = (Index("ix_premium_history_insurance", "insurance_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    insurance_id: Mapped[int] = mapped_column(ForeignKey("insurances.id"), nullable=False)
+    praemie_eur: Mapped[float | None] = mapped_column(Float, nullable=True)
+    zahlungsintervall: Mapped[Zahlungsintervall] = mapped_column(
+        SAEnum(Zahlungsintervall), default=Zahlungsintervall.JAEHRLICH, nullable=False
+    )
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
 class Recommendation(Base):

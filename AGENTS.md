@@ -60,7 +60,7 @@ Antwort + Quellen
 
 ```
 KFZ, Haftpflicht, Hausrat, Gebäude, Kranken, Zahnzusatz,
-Unfall, Rechtsschutz, Leben, Reise, Tier, Sonstige
+Unfall, Rechtsschutz, Leben, Reise, Tier, Geräteversicherung, Sonstige
 ```
 
 ## Agenten
@@ -106,8 +106,8 @@ class VersicherungsExtraktion(BaseModel):
 |---|---|
 | **Modell** | `gpt-5.4-mini` |
 | **Aufgabe** | Fragen zu gespeicherten Versicherungen beantworten |
-| **Tools** | `chromadb_search(frage)`, `get_insurance_metadata(id)`, `list_insurances()` |
-| **Input** | Nutzerfrage als Text |
+| **Tools** | `chromadb_search(frage)`, `get_insurance_metadata(id)`, `list_insurances()`, `web_search(query)` |
+| **Input** | Nutzerfrage als Text (optional mit Gesprächsverlauf) |
 | **Output** | `ChatAntwort` |
 
 ```python
@@ -122,8 +122,8 @@ class ChatAntwort(BaseModel):
 | | |
 |---|---|
 | **Modell** | `gpt-5.4-mini` |
-| **Aufgabe** | Versicherungen mit Referenzwerten vergleichen |
-| **Tools** | `get_reference_values(kategorie)` |
+| **Aufgabe** | Versicherungen ganzheitlich bewerten (Preis + Deckung) |
+| **Tools** | `get_reference_values(kategorie)`, `get_versicherung_details(id)`, `web_search(query)` |
 | **Output** | `Empfehlung` |
 
 ```python
@@ -138,10 +138,14 @@ class Empfehlung(BaseModel):
 Reiner Python-Service, kein Agent. Wird täglich via APScheduler ausgelöst.
 
 - Prüft Versicherungs- und Garantie-Abläufe in 90/30/7 Tagen
+- Prüft Kündigungsfristen („kündbar bis", jährlich wiederkehrend) in 30/7 Tagen
 - Sendet HTTP POST an `https://api.pushover.net/1/messages.json`
 - 7-Tage-Alarm: `priority=1` (Hochpriorität)
 - 30/90-Tage-Alarm: `priority=0` (normal)
-- Markiert gesendete Notifications in DB (kein Doppelversand)
+- Dedupliziert über `(ref_type, ref_id, days_before, target_date)` — nach
+  Vertragsverlängerung oder im Folgejahr startet automatisch ein neuer Warnzyklus
+- `FAILED`-Sendungen werden bis 3 Tage nach Fälligkeit erneut versucht;
+  veraltete Warnungen (Eintrag gelöscht/Datum geändert) werden verworfen
 
 ## Sicherheits-Pflichten (aus SKILL.md)
 
@@ -150,7 +154,7 @@ Reiner Python-Service, kein Agent. Wird täglich via APScheduler ausgelöst.
 | LLM01 | Prompt-Injection-Pattern-Check im Input-Guardrail |
 | LLM02 | Sensitive-Info-Check auf Freitext-Feldern (`hinweise`, `antwort`) |
 | LLM03 | `pyproject.toml` mit `==`-Pins, `uv.lock` committen |
-| LLM04 | Magic-Bytes-Validierung, max. 10 MB pro Upload |
+| LLM04 | Magic-Bytes-Validierung, max. 80 MB (Dokumente) / 10 MB (Rechnungen); Pixel-Deckel gegen PDF-Bomben |
 | LLM05 | Allowlist-Validierung für `kategorie`, kein direktes Pfad-Konkatenieren |
 | LLM06 | Minimale Tools, Schreiboperationen außerhalb des Agenten |
 | LLM07 | System-Prompt enthält keine Secrets |

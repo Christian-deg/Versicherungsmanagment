@@ -5,6 +5,7 @@ import logging
 from datetime import date, timedelta
 from pathlib import Path
 
+import anyio.to_thread
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -57,11 +58,12 @@ async def analyze_invoice_file(
     incoming = settings.documents_dir.resolve() / "_incoming"
     incoming.mkdir(parents=True, exist_ok=True)
     tmp_path = incoming / f"_analyze_{uuid.uuid4().hex}{suffix}"
-    tmp_path.write_bytes(content)
+    # Datei-I/O und PDF-Rendering blockieren — im Thread, damit der Event-Loop frei bleibt
+    await anyio.to_thread.run_sync(tmp_path.write_bytes, content)
 
     try:
-        images = storage_service.read_document_image_bytes(str(tmp_path))
-        native_text = storage_service.extract_document_text(str(tmp_path))
+        images = await anyio.to_thread.run_sync(storage_service.read_document_image_bytes, str(tmp_path))
+        native_text = await anyio.to_thread.run_sync(storage_service.extract_document_text, str(tmp_path))
     except storage_service.StorageError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     finally:
@@ -78,6 +80,7 @@ async def analyze_invoice_file(
         purchase_date=result.purchase_date,
         amount_eur=result.amount_eur,
         produkt_name=result.produkt_name,
+        garantie_monate=result.garantie_monate,
         notes=result.notes,
     )
 
@@ -120,11 +123,12 @@ async def upload_invoice(
 
     retain = _compute_retain_until(pd, product)
 
-    stored_path, mime = storage_service.store_invoice(
-        content=content,
-        original_filename=file.filename or "rechnung",
-        product_name=product.name,
-        ref_date=pd or product.purchase_date,
+    stored_path, mime = await anyio.to_thread.run_sync(
+        storage_service.store_invoice,
+        content,
+        file.filename or "rechnung",
+        product.name,
+        pd or product.purchase_date,
     )
 
     invoice = Invoice(
@@ -167,22 +171,39 @@ def get_invoice(invoice_id: int, db: Session = Depends(get_db)) -> Invoice:
     return inv
 
 
-@router.get("/{invoice_id}/download")
-def download_invoice(invoice_id: int, db: Session = Depends(get_db)) -> FileResponse:
-    """Liefert die gespeicherte Rechnungsdatei als Download (Originaldateiname)."""
+def _resolve_invoice_file(db: Session, invoice_id: int) -> tuple[Invoice, Path]:
+    """Lädt Rechnung + sicher aufgelösten Dateipfad (404/410 bei Problemen)."""
     inv = db.get(Invoice, invoice_id)
     if not inv:
         raise HTTPException(status_code=404, detail="Rechnung nicht gefunden")
-
-    base = settings.invoices_dir.resolve()
-    path = Path(inv.stored_path).resolve()
-    if not path.is_relative_to(base) or not path.exists():
+    # resolve_stored_path verankert auch Pfade aus anderer Umgebung (Docker ↔ lokal)
+    path = storage_service.resolve_stored_path(inv.stored_path, settings.invoices_dir)
+    if path is None or not path.exists():
         raise HTTPException(
             status_code=status.HTTP_410_GONE, detail="Rechnungsdatei nicht mehr vorhanden"
         )
+    return inv, path
+
+
+@router.get("/{invoice_id}/download")
+def download_invoice(invoice_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    """Liefert die gespeicherte Rechnungsdatei als Download (Originaldateiname)."""
+    inv, path = _resolve_invoice_file(db, invoice_id)
     # filename setzt Content-Disposition: attachment — Datei wird heruntergeladen,
     # nicht im Browser gerendert
     return FileResponse(path, media_type=inv.mime_type, filename=inv.original_filename)
+
+
+@router.get("/{invoice_id}/file")
+def view_invoice_file(invoice_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    """Liefert die Rechnungsdatei zur Ansicht im Browser (inline) — wie bei Dokumenten."""
+    inv, path = _resolve_invoice_file(db, invoice_id)
+    return FileResponse(
+        path,
+        media_type=inv.mime_type,
+        filename=inv.original_filename,
+        content_disposition_type="inline",
+    )
 
 
 @router.delete("/{invoice_id}", status_code=status.HTTP_204_NO_CONTENT)

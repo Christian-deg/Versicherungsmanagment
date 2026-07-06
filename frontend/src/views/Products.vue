@@ -26,12 +26,20 @@
         />
       </v-col>
       <v-col cols="12" md="6" class="d-flex flex-wrap align-center ga-2">
-        <v-chip :color="statusFilter === 'all' ? 'primary' : undefined" @click="statusFilter = 'all'">Alle {{ items.length }}</v-chip>
+        <v-chip :color="statusFilter === 'all' ? 'primary' : undefined" @click="statusFilter = 'all'">Alle {{ activeItems.length }}</v-chip>
         <v-chip :color="statusFilter === 'warning' ? 'warning' : undefined" @click="statusFilter = 'warning'">
           Läuft bald ab ({{ expiringSoonCount }})
         </v-chip>
         <v-chip :color="statusFilter === 'expired' ? 'error' : undefined" @click="statusFilter = 'expired'">
           Abgelaufen ({{ expiredCount }})
+        </v-chip>
+        <v-chip
+          v-if="archivedCount"
+          :color="statusFilter === 'archived' ? 'secondary' : undefined"
+          prepend-icon="mdi-archive"
+          @click="statusFilter = 'archived'"
+        >
+          Archiv ({{ archivedCount }})
         </v-chip>
       </v-col>
     </v-row>
@@ -52,8 +60,15 @@
       </v-empty-state>
       <v-card v-for="item in filteredItems" :key="item.id" class="mb-3">
         <v-card-item>
-          <v-card-title class="text-subtitle-1 text-wrap">{{ item.name }}</v-card-title>
-          <v-card-subtitle>{{ item.kategorie }}</v-card-subtitle>
+          <v-card-title class="text-subtitle-1 text-wrap">
+            <router-link :to="`/products/${item.id}`" class="text-decoration-none text-primary">
+              {{ item.name }}
+            </router-link>
+            <v-chip v-if="item.archived" size="x-small" color="grey" class="ml-1">archiviert</v-chip>
+          </v-card-title>
+          <v-card-subtitle>
+            <v-icon :icon="productIcon(item.kategorie)" size="small" class="mr-1" />{{ item.kategorie }}
+          </v-card-subtitle>
         </v-card-item>
         <v-card-text class="pt-0">
           <v-chip size="small" :color="endColor(item.warranty_end)" class="mb-2">
@@ -64,6 +79,9 @@
           </div>
           <div v-if="item.linked_insurance_id" class="text-body-2 text-medium-emphasis">
             Versicherung: {{ insuranceName(item.linked_insurance_id) }}
+          </div>
+          <div v-for="issue in issuesFor(item)" :key="issue" class="text-caption text-warning mt-1">
+            <v-icon size="x-small" icon="mdi-alert-circle-outline" /> {{ issue }}
           </div>
         </v-card-text>
         <v-card-actions class="pt-0">
@@ -79,6 +97,23 @@
 
     <!-- Desktop: Tabelle -->
     <v-data-table v-else :headers="headers" :items="filteredItems" :items-per-page="20">
+      <template #item.name="{ item }">
+        <router-link :to="`/products/${item.id}`" class="text-decoration-none text-primary font-weight-medium">
+          {{ item.name }}
+        </router-link>
+        <v-chip v-if="item.archived" size="x-small" color="grey" class="ml-1">archiviert</v-chip>
+        <v-tooltip v-if="issuesFor(item).length" location="top">
+          <template #activator="{ props }">
+            <v-icon v-bind="props" icon="mdi-alert-circle-outline" color="warning" size="small" class="ml-1" />
+          </template>
+          <div v-for="issue in issuesFor(item)" :key="issue">• {{ issue }}</div>
+        </v-tooltip>
+      </template>
+      <template #item.kategorie="{ item }">
+        <v-chip size="small" color="primary" variant="tonal" :prepend-icon="productIcon(item.kategorie)">
+          {{ item.kategorie }}
+        </v-chip>
+      </template>
       <template #item.warranty_end="{ item }">
         <v-chip size="small" :color="endColor(item.warranty_end)">
           {{ item.warranty_end ? `${formatDate(item.warranty_end)} · ${daysLabel(item.warranty_end)}` : '–' }}
@@ -120,33 +155,7 @@
       </template>
     </v-data-table>
 
-    <v-dialog v-model="dialog" max-width="600" :fullscreen="smAndDown">
-      <v-card>
-        <v-card-title class="d-flex align-center">
-          {{ editing.id ? 'Produkt bearbeiten' : 'Neues Produkt' }}
-          <v-spacer />
-          <v-btn v-if="smAndDown" icon="mdi-close" variant="text" @click="dialog = false" />
-        </v-card-title>
-        <v-card-text>
-          <p class="text-body-2 text-medium-emphasis mb-4">
-            Ein Garantieende hilft dir, rechtzeitig vor Ablauf erinnert zu werden.
-          </p>
-          <v-text-field v-model="editing.name" label="Name" required />
-          <v-text-field v-model="editing.kategorie" label="Kategorie (frei)" />
-          <v-row>
-            <v-col cols="12" sm="6"><v-text-field v-model="editing.purchase_date" label="Kaufdatum" type="date" /></v-col>
-            <v-col cols="12" sm="6"><v-text-field v-model="editing.warranty_end" label="Garantieende" type="date" /></v-col>
-          </v-row>
-          <v-select v-model="editing.linked_insurance_id" :items="insuranceOptions" label="Verknüpfte Versicherung (optional)" clearable />
-          <v-textarea v-model="editing.notes" label="Notizen" rows="2" />
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn @click="dialog = false">Abbrechen</v-btn>
-          <v-btn color="primary" :disabled="!editing.name" @click="save">Speichern</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
+    <ProductFormDialog v-model="dialog" :product="formTarget" @saved="onSaved" />
 
     <!-- Bestätigungs-Dialog für Löschen -->
     <v-dialog v-model="deleteDialog" max-width="400">
@@ -167,26 +176,42 @@
       </v-card>
     </v-dialog>
 
-    <v-snackbar v-model="snack.show" :color="snack.color">{{ snack.text }}</v-snackbar>
+    <v-snackbar v-model="snack.show" :color="snack.color" :timeout="snack.undo ? 5000 : 4000">
+      {{ snack.text }}
+      <template v-if="snack.undo" #actions>
+        <v-btn variant="text" @click="undoDelete">Rückgängig</v-btn>
+      </template>
+    </v-snackbar>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from 'vuetify'
-import { productsApi, insurancesApi } from '../api'
-import { daysLabel, expiryColor, formatDate, daysUntil } from '../utils'
+import { productsApi, insurancesApi, invoicesApi } from '../api'
+import ProductFormDialog from '../components/ProductFormDialog.vue'
+import { productIcon } from '../constants'
+import { daysLabel, expiryColor, formatDate, daysUntil, persistedRef, productQualityIssues } from '../utils'
 
+const route = useRoute()
 const router = useRouter()
 const { smAndDown } = useDisplay()
 const items = ref([])
 const insurances = ref([])
 const dialog = ref(false)
-const editing = ref({})
+const formTarget = ref(null)
 const snack = ref({ show: false, color: 'success', text: '' })
-const search = ref('')
-const statusFilter = ref('all')
+// ?search=... aus der globalen Suche übernehmen (auch wenn die Seite schon offen ist)
+const search = ref(typeof route.query.search === 'string' ? route.query.search : '')
+watch(
+  () => route.query.search,
+  (v) => {
+    if (typeof v === 'string') search.value = v
+  }
+)
+// Filterwahl überlebt Seitenwechsel und Neustarts
+const statusFilter = persistedRef('versicherung-filter-products', 'all')
 const initialLoading = ref(true)
 const deleteDialog = ref(false)
 const deleteTarget = ref(null)
@@ -200,19 +225,20 @@ const headers = [
   { title: '', key: 'actions', sortable: false, align: 'end' },
 ]
 
-const insuranceOptions = computed(() =>
-  insurances.value.map((i) => ({ title: `${i.name} (${i.versicherer})`, value: i.id }))
-)
-
 function insuranceName(id) {
   const ins = insurances.value.find((i) => i.id === id)
   return ins ? `${ins.name} (${ins.versicherer})` : `ID ${id}`
 }
 
 const endColor = expiryColor
+// Aktive Produkte (Standard-Ansichten); Archivierte nur über den Archiv-Filter
+const activeItems = computed(() => items.value.filter((i) => !i.archived))
+const archivedCount = computed(() => items.value.length - activeItems.value.length)
+
 const filteredItems = computed(() => {
   const query = search.value.trim().toLowerCase()
-  return items.value.filter((item) => {
+  const pool = statusFilter.value === 'archived' ? items.value.filter((i) => i.archived) : activeItems.value
+  return pool.filter((item) => {
     const insTitle = insurances.value.find((ins) => ins.id === item.linked_insurance_id)?.name || ''
     const matchesQuery = !query || [item.name, item.kategorie, insTitle]
       .filter(Boolean)
@@ -225,77 +251,101 @@ const filteredItems = computed(() => {
     return true
   })
 })
-const expiringSoonCount = computed(() => items.value.filter((item) => {
+const expiringSoonCount = computed(() => activeItems.value.filter((item) => {
   const days = daysUntil(item.warranty_end)
   return days != null && days >= 0 && days <= 90
 }).length)
-const expiredCount = computed(() => items.value.filter((item) => {
+const expiredCount = computed(() => activeItems.value.filter((item) => {
   const days = daysUntil(item.warranty_end)
   return days != null && days < 0
 }).length)
+
+// IDs aller Produkte mit mindestens einem Beleg (für den Datenqualitäts-Check)
+const productIdsWithInvoices = ref(new Set())
+
+function issuesFor(item) {
+  return productQualityIssues(item, productIdsWithInvoices.value.has(item.id))
+}
+
 async function load() {
   try {
-    items.value = await productsApi.list()
-    insurances.value = await insurancesApi.list()
+    const [products, allInsurances, allInvoices] = await Promise.all([
+      productsApi.list(),
+      insurancesApi.list(),
+      invoicesApi.list(),
+    ])
+    items.value = products
+    insurances.value = allInsurances
+    productIdsWithInvoices.value = new Set(allInvoices.map((i) => i.product_id))
   } catch (e) {
     snack.value = { show: true, color: 'error', text: 'Laden fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
   }
 }
 
 function openNew() {
-  editing.value = { name: '', kategorie: '', notes: '', linked_insurance_id: null }
+  formTarget.value = null
   dialog.value = true
 }
-
-// Kaufdatum geändert → Garantieende automatisch auf +2 Jahre setzen (nur wenn noch leer)
-watch(
-  () => editing.value.purchase_date,
-  (newDate) => {
-    if (!newDate || editing.value.warranty_end) return
-    const d = new Date(newDate)
-    d.setFullYear(d.getFullYear() + 2)
-    editing.value.warranty_end = d.toISOString().slice(0, 10)
-  }
-)
 
 function goInvoices(item) {
   router.push({ path: '/invoices', query: { product: item.id } })
 }
-function openEdit(item) { editing.value = { ...item }; dialog.value = true }
+function openEdit(item) {
+  formTarget.value = item
+  dialog.value = true
+}
 
-async function save() {
-  try {
-    const payload = { ...editing.value }
-    delete payload.created_at
-    // '' (geleertes Datumsfeld) → null, sonst lehnt das Backend mit 422 ab
-    if (payload.purchase_date === '') payload.purchase_date = null
-    if (payload.warranty_end === '') payload.warranty_end = null
-    if (editing.value.id) {
-      await productsApi.update(editing.value.id, payload)
-    } else {
-      await productsApi.create(payload)
-    }
-    dialog.value = false
-    await load()
-  } catch (e) {
-    snack.value = { show: true, color: 'error', text: 'Speichern fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
-  }
+async function onSaved() {
+  snack.value = { show: true, color: 'success', text: 'Produkt gespeichert' }
+  await load()
 }
 function confirmDelete(item) {
   deleteTarget.value = item
   deleteDialog.value = true
 }
-async function onDelete() {
-  deleteDialog.value = false
-  try {
-    await productsApi.delete(deleteTarget.value.id)
-    await load()
-  } catch (e) {
-    snack.value = { show: true, color: 'error', text: 'Löschen fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
-  } finally {
-    deleteTarget.value = null
-  }
+
+// Lösch-Undo: Eintrag verschwindet sofort, der API-Aufruf läuft erst nach 5 s —
+// solange kann „Rückgängig" ihn abbrechen (analog zur Vertragsliste).
+let pendingDelete = null
+
+function flushPendingDelete() {
+  if (!pendingDelete) return
+  clearTimeout(pendingDelete.timer)
+  const { item } = pendingDelete
+  pendingDelete = null
+  productsApi.delete(item.id).catch(() => {})
 }
+
+function onDelete() {
+  deleteDialog.value = false
+  const item = deleteTarget.value
+  deleteTarget.value = null
+  flushPendingDelete()
+  items.value = items.value.filter((i) => i.id !== item.id)
+  pendingDelete = {
+    item,
+    timer: setTimeout(async () => {
+      pendingDelete = null
+      try {
+        await productsApi.delete(item.id)
+      } catch (e) {
+        snack.value = { show: true, color: 'error', text: 'Löschen fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
+        await load()
+      }
+    }, 5000),
+  }
+  snack.value = { show: true, color: 'info', text: `„${item.name}" gelöscht.`, undo: true }
+}
+
+async function undoDelete() {
+  if (!pendingDelete) return
+  clearTimeout(pendingDelete.timer)
+  pendingDelete = null
+  snack.value = { show: true, color: 'success', text: 'Löschen rückgängig gemacht.' }
+  await load()
+}
+
+onBeforeUnmount(flushPendingDelete)
 
 onMounted(async () => {
   await load()

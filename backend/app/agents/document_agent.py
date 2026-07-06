@@ -188,15 +188,17 @@ def _sanitize_filename(filename: str) -> str:
     return safe or "dokument"
 
 
-def _build_vision_input(images_png: list[bytes], filename: str) -> list[dict[str, Any]]:
-    """Baut den Vision-Input für die Responses-API. Statischer Header + dynamischer Block."""
+def _build_vision_input(images_b64: list[str], filename: str) -> list[dict[str, Any]]:
+    """Baut den Vision-Input für die Responses-API. Statischer Header + dynamischer Block.
+
+    images_b64: vorab Base64-kodierte PNG-Seiten (einmal kodieren, nicht je Retry).
+    """
     # LLM01: Dateinamen sanitieren — er landet als Text im Modell-Kontext
     safe_filename = _sanitize_filename(filename)
     content: list[dict[str, Any]] = [
         {"type": "input_text", "text": f"<dokument name='{safe_filename}'>"}
     ]
-    for img in images_png:
-        b64 = base64.b64encode(img).decode("ascii")
+    for b64 in images_b64:
         content.append({"type": "input_image", "image_url": f"data:image/png;base64,{b64}"})
     content.append({"type": "input_text", "text": "</dokument>"})
     return [{"role": "user", "content": content}]
@@ -210,11 +212,12 @@ async def analyze_document(images_png: list[bytes], filename: str) -> Versicheru
     if not images_png:
         raise ValueError("Keine Bilder zur Analyse übergeben")
 
+    images_b64 = [base64.b64encode(img).decode("ascii") for img in images_png]
     last_eval: Bewertung | None = None
     last_result: VersicherungsExtraktion | None = None
 
     for attempt in range(1, MAX_RETRIES + 1):
-        vision_input = _build_vision_input(images_png, filename)
+        vision_input = _build_vision_input(images_b64, filename)
 
         # Retry-Feedback als zusätzlicher User-Block (nicht in System-Prompt mischen)
         if last_eval and not last_eval.bestanden:

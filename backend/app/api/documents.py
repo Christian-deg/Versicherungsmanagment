@@ -5,16 +5,20 @@ import logging
 import uuid
 from pathlib import Path
 
+import anyio.to_thread
 from agents.exceptions import InputGuardrailTripwireTriggered, OutputGuardrailTripwireTriggered
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.agents.classifier_agent import classify_document
 from app.agents.document_agent import analyze_document
+from app.api.insurances import record_premium
 from app.config import settings
 from app.models.database import get_db
 from app.models.models import Document, Insurance, Recommendation
 from app.schemas.schemas import (
+    DocumentAssignPayload,
     DocumentClassification,
     DocumentRead,
     ExtractionPreview,
@@ -28,26 +32,9 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _rag_metadata(ins: Insurance, ai_summary: str | None = None) -> str:
-    """Erzeugt den Metadaten-Block für RAG (gemeinsam für primäres und Extra-Dokument)."""
-    if ins.kuendigung_bis_tag and ins.kuendigung_bis_monat:
-        kuendigung = f"jährlich kündbar bis {ins.kuendigung_bis_tag:02d}.{ins.kuendigung_bis_monat:02d}."
-        if ins.kuendigung_zum_tag and ins.kuendigung_zum_monat:
-            zum = f"{ins.kuendigung_zum_tag:02d}.{ins.kuendigung_zum_monat:02d}."
-            kuendigung += f", Vertrag endet dann zum {zum}"
-    else:
-        kuendigung = "nicht angegeben"
-    text = (
-        f"Versicherung: {ins.name}\nKategorie: {ins.kategorie.value}\n"
-        f"Versicherer: {ins.versicherer}\nVertragsnummer: {ins.vertragsnummer}\n"
-        f"Laufzeit: {ins.start_date} bis {ins.end_date}\n"
-        f"Prämie: {ins.praemie_eur} EUR ({ins.zahlungsintervall.value})\n"
-        f"Kündigung: {kuendigung}\n"
-        f"Notizen: {ins.notes or ''}"
-    )
-    if ai_summary:
-        text += f"\nKI-Hinweise: {ai_summary}"
-    return text
+# Gemeinsamer Metadaten-Block für RAG — zentral im embedding_service, damit der
+# Metadaten-Refresh nach Vertragsänderungen dieselbe Struktur erzeugt
+_rag_metadata = embedding_service.build_insurance_metadata
 
 
 async def _embed_document_task(
@@ -62,12 +49,13 @@ async def _embed_document_task(
     """
     rag_text = base_text
     try:
-        fulltext = storage_service.extract_document_text(stored_path)
+        fulltext = await anyio.to_thread.run_sync(storage_service.extract_document_text, stored_path)
         if not fulltext:
             log.info("Kein Textlayer — starte Vision-OCR für Dokument %d", document_id)
             fulltext = await embedding_service.ocr_document_text(stored_path)
         if fulltext:
-            rag_text = rag_text + "\n\n--- Dokumentvolltext ---\n\n" + fulltext
+            fulltext = fulltext[: embedding_service.MAX_FULLTEXT_CHARS]
+            rag_text = rag_text + embedding_service.FULLTEXT_SEPARATOR + fulltext
             log.info("Volltext eingebettet (%d Zeichen) für Dokument %d", len(fulltext), document_id)
         else:
             log.info("Kein Volltext extrahierbar für Dokument %d", document_id)
@@ -102,17 +90,20 @@ async def classify_uploaded_document(
     incoming = settings.documents_dir.resolve() / "_incoming"
     incoming.mkdir(parents=True, exist_ok=True)
     tmp_path = incoming / f"_classify_{uuid.uuid4().hex}{suffix}"
-    tmp_path.write_bytes(content)
+    # Datei-I/O und PDF-Rendering blockieren — im Thread, damit der Event-Loop frei bleibt
+    await anyio.to_thread.run_sync(tmp_path.write_bytes, content)
 
     try:
         try:
-            text = storage_service.extract_document_text(str(tmp_path))
+            text = await anyio.to_thread.run_sync(storage_service.extract_document_text, str(tmp_path))
         except storage_service.StorageError as e:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
         first_page: bytes | None = None
         if not text:
             try:
-                images = storage_service.read_document_image_bytes(str(tmp_path))
+                images = await anyio.to_thread.run_sync(
+                    storage_service.read_document_image_bytes, str(tmp_path)
+                )
                 first_page = images[0] if images else None
             except storage_service.StorageError as e:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
@@ -145,11 +136,11 @@ async def upload_document(
     incoming = settings.documents_dir.resolve() / "_incoming"
     incoming.mkdir(parents=True, exist_ok=True)
     tmp_path = incoming / f"{uuid.uuid4().hex}{suffix}"
-    tmp_path.write_bytes(content)
+    await anyio.to_thread.run_sync(tmp_path.write_bytes, content)
 
-    # Bilder extrahieren (PDF → PNG-Seiten oder direktes Bild)
+    # Bilder extrahieren (PDF → PNG-Seiten oder direktes Bild) — CPU-lastig, daher im Thread
     try:
-        images = storage_service.read_document_image_bytes(str(tmp_path))
+        images = await anyio.to_thread.run_sync(storage_service.read_document_image_bytes, str(tmp_path))
     except storage_service.StorageError as e:
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
@@ -226,7 +217,7 @@ async def upload_document_extra(
     incoming = settings.documents_dir.resolve() / "_incoming"
     incoming.mkdir(parents=True, exist_ok=True)
     tmp_path = incoming / f"{uuid.uuid4().hex}{suffix}"
-    tmp_path.write_bytes(content)
+    await anyio.to_thread.run_sync(tmp_path.write_bytes, content)
 
     doc = Document(
         insurance_id=None,
@@ -266,19 +257,21 @@ async def confirm_extraction(
     ins = Insurance(**ins_data)
     db.add(ins)
     db.flush()  # ID erhalten
+    record_premium(db, ins)  # Startwert für den Prämienverlauf
 
     # Datei in finalen Ordner verschieben
     src = Path(doc.stored_path)
     if not src.exists():
         raise HTTPException(status_code=410, detail="Quelldatei nicht mehr vorhanden")
-    content = src.read_bytes()
+    content = await anyio.to_thread.run_sync(src.read_bytes)
     try:
-        final_path, _ = storage_service.store_document(
-            content=content,
-            original_filename=doc.original_filename,
-            kategorie=ins.kategorie,
-            versicherer=ins.versicherer,
-            ref_date=ins.start_date,
+        final_path, _ = await anyio.to_thread.run_sync(
+            storage_service.store_document,
+            content,
+            doc.original_filename,
+            ins.kategorie,
+            ins.versicherer,
+            ins.start_date,
         )
     except storage_service.StorageError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
@@ -306,14 +299,15 @@ async def confirm_extraction(
         if not extra_src.exists():
             log.warning("Extra-Dokument %d: Quelldatei nicht mehr vorhanden", extra_id)
             continue
-        extra_content = extra_src.read_bytes()
+        extra_content = await anyio.to_thread.run_sync(extra_src.read_bytes)
         try:
-            extra_final_path, _ = storage_service.store_document(
-                content=extra_content,
-                original_filename=extra_doc.original_filename,
-                kategorie=ins.kategorie,
-                versicherer=ins.versicherer,
-                ref_date=ins.start_date,
+            extra_final_path, _ = await anyio.to_thread.run_sync(
+                storage_service.store_document,
+                extra_content,
+                extra_doc.original_filename,
+                ins.kategorie,
+                ins.versicherer,
+                ins.start_date,
             )
         except storage_service.StorageError as e:
             log.warning("Extra-Dokument %d konnte nicht verschoben werden: %s", extra_id, e)
@@ -330,6 +324,56 @@ async def confirm_extraction(
     return ins
 
 
+@router.post("/assign/{document_id}", response_model=DocumentRead)
+async def assign_document(
+    document_id: int,
+    payload: DocumentAssignPayload,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> Document:
+    """Ordnet ein analysiertes, noch unbestätigtes Dokument einem bestehenden Vertrag zu.
+
+    Für die Duplikat-Erkennung beim Upload: erkennt das Frontend anhand der
+    Vertragsnummer einen bereits vorhandenen Vertrag, wird das Dokument direkt
+    angehängt statt einen Doppel-Vertrag anzulegen. Die Datei wird in den
+    finalen Ordner verschoben und im Hintergrund volltextindiziert.
+    """
+    doc = db.get(Document, document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Dokument nicht gefunden")
+    if doc.insurance_id is not None:
+        raise HTTPException(status_code=400, detail="Dokument ist bereits zugeordnet")
+    ins = db.get(Insurance, payload.insurance_id)
+    if not ins:
+        raise HTTPException(status_code=404, detail="Versicherung nicht gefunden")
+
+    src = Path(doc.stored_path)
+    if not src.exists():
+        raise HTTPException(status_code=410, detail="Quelldatei nicht mehr vorhanden")
+    content = await anyio.to_thread.run_sync(src.read_bytes)
+    try:
+        final_path, _ = await anyio.to_thread.run_sync(
+            storage_service.store_document,
+            content,
+            doc.original_filename,
+            ins.kategorie,
+            ins.versicherer,
+            None,  # ref_date: Ablage im Jahresordner des Uploads
+        )
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    src.unlink(missing_ok=True)
+    doc.stored_path = str(final_path)
+    doc.insurance_id = ins.id
+    db.commit()
+    db.refresh(doc)
+
+    background.add_task(
+        _embed_document_task, ins.id, doc.id, _rag_metadata(ins, doc.ai_summary), doc.stored_path
+    )
+    return doc
+
+
 @router.get("", response_model=list[DocumentRead])
 def list_documents(
     insurance_id: int | None = None,
@@ -340,6 +384,31 @@ def list_documents(
     if insurance_id is not None:
         q = q.filter(Document.insurance_id == insurance_id)
     return q.order_by(Document.uploaded_at.desc()).all()
+
+
+@router.post("/maintenance/reindex")
+async def reindex_missing_documents(
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Konsistenz-Check des Suchindex: fehlende Dokumente werden neu indiziert.
+
+    Vergleicht alle zugeordneten Dokumente mit dem Vektorindex und stößt für
+    fehlende Einträge das Embedding (inkl. Volltext/OCR-Fallback) im Hintergrund
+    neu an. Gibt die Anzahl geprüfter und nachindizierter Dokumente zurück.
+    """
+    docs = db.query(Document).filter(Document.insurance_id.isnot(None)).all()
+    indexed = await anyio.to_thread.run_sync(embedding_service.existing_document_ids)
+    missing = [d for d in docs if d.id not in indexed]
+    for doc in missing:
+        ins = db.get(Insurance, doc.insurance_id)
+        if not ins:
+            continue
+        background.add_task(
+            _embed_document_task, ins.id, doc.id, _rag_metadata(ins, doc.ai_summary), doc.stored_path
+        )
+    log.info("Suchindex-Check: %d Dokumente, %d fehlen und werden neu indiziert", len(docs), len(missing))
+    return {"dokumente": len(docs), "fehlend": len(missing)}
 
 
 @router.post("/attach/{insurance_id}", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
@@ -361,12 +430,13 @@ async def attach_document(
 
     content = await file.read(settings.max_upload_bytes + 1)
     try:
-        final_path, mime = storage_service.store_document(
-            content=content,
-            original_filename=file.filename or "dokument",
-            kategorie=ins.kategorie,
-            versicherer=ins.versicherer,
-            ref_date=None,  # Ablage im Jahresordner des Uploads
+        final_path, mime = await anyio.to_thread.run_sync(
+            storage_service.store_document,
+            content,
+            file.filename or "dokument",
+            ins.kategorie,
+            ins.versicherer,
+            None,  # ref_date: Ablage im Jahresordner des Uploads
         )
     except storage_service.StorageError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
@@ -384,6 +454,32 @@ async def attach_document(
 
     background.add_task(_embed_document_task, ins.id, doc.id, _rag_metadata(ins), doc.stored_path)
     return doc
+
+
+@router.get("/{document_id}/file")
+def get_document_file(document_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    """Liefert die gespeicherte Dokumentdatei zur Ansicht im Browser (inline).
+
+    MIME ist per Upload-Validierung strikt auf PDF/PNG/JPEG begrenzt — diese
+    Typen rendert der Browser in seinem eingebauten Viewer (Download von dort
+    jederzeit möglich).
+    """
+    doc = db.get(Document, document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Dokument nicht gefunden")
+
+    # resolve_stored_path verankert auch Pfade aus anderer Umgebung (Docker ↔ lokal)
+    path = storage_service.resolve_stored_path(doc.stored_path, settings.documents_dir)
+    if path is None or not path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE, detail="Dokumentdatei nicht mehr vorhanden"
+        )
+    return FileResponse(
+        path,
+        media_type=doc.mime_type,
+        filename=doc.original_filename,
+        content_disposition_type="inline",
+    )
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)

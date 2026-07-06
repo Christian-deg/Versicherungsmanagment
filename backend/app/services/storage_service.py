@@ -30,6 +30,11 @@ class StorageError(ValueError):
     pass
 
 
+# Obergrenze der gerenderten Pixel je PDF-Seite (A4 bei 150 dpi ≈ 2,2 MP;
+# 20 MP ≈ 60 MB unkomprimiert) — Schutz vor Dekompressions-Bomben
+_MAX_PAGE_PIXELS = 20_000_000
+
+
 def validate_upload(filename: str, content: bytes, max_bytes: int | None = None) -> tuple[str, str]:
     """Prüft Dateiname, Suffix, Größe und Magic-Bytes. Gibt (suffix, mime) zurück.
 
@@ -126,6 +131,33 @@ def _slug(text: str) -> str:
     return "".join(c if c in allowed else "_" for c in text.strip())[:50]
 
 
+def resolve_stored_path(stored_path: str, base: Path) -> Path | None:
+    """Löst einen in der DB gespeicherten Pfad sicher gegen das aktuelle Datenverzeichnis auf.
+
+    stored_path kann aus einer anderen Umgebung stammen (Docker: /app/data/…,
+    lokal: .\\data\\…) — die Dateien sind per Volume dieselben. Liegt der Pfad
+    nicht direkt unterhalb von base, wird der Teil hinter dem base-Ordnernamen
+    (z.B. 'documents') gegen base neu verankert. Gibt None zurück, wenn der
+    Pfad nicht sicher innerhalb von base auflösbar ist (Traversal-Schutz).
+    """
+    base = base.resolve()
+    p = Path(stored_path)
+    try:
+        rp = p.resolve()
+        if rp.is_relative_to(base):
+            return rp
+    except OSError:
+        pass
+    parts = p.as_posix().split("/")
+    if base.name in parts:
+        tail = parts[parts.index(base.name) + 1 :]
+        if tail:
+            candidate = base.joinpath(*tail).resolve()
+            if candidate.is_relative_to(base):
+                return candidate
+    return None
+
+
 def read_document_image_bytes(stored_path: str) -> list[bytes]:
     """Liest ein gespeichertes Dokument und gibt eine Liste von PNG-Bildern zurück.
 
@@ -133,8 +165,8 @@ def read_document_image_bytes(stored_path: str) -> list[bytes]:
     Bilder werden direkt zurückgegeben.
     """
     base = settings.documents_dir.resolve()
-    path = Path(stored_path).resolve()
-    if not path.is_relative_to(base):
+    path = resolve_stored_path(stored_path, base)
+    if path is None:
         raise StorageError("Pfad außerhalb des Dokumentenverzeichnisses")
     if not path.exists():
         raise StorageError(f"Datei nicht gefunden: {path.name}")
@@ -147,7 +179,14 @@ def read_document_image_bytes(stored_path: str) -> list[bytes]:
             with pymupdf.open(path) as doc:
                 # Maximal 10 Seiten analysieren (LLM10)
                 for page in doc.pages(stop=10):
-                    pix = page.get_pixmap(dpi=150)
+                    # Pixel-Deckel gegen PDF-Bomben: eine präparierte Seite mit
+                    # riesigen Abmessungen würde bei fixen 150 dpi unkomprimiert
+                    # hunderte MB allokieren (OOM). Zoom ggf. herunterskalieren.
+                    zoom = 150 / 72
+                    pixels = (page.rect.width * zoom) * (page.rect.height * zoom)
+                    if pixels > _MAX_PAGE_PIXELS:
+                        zoom *= (_MAX_PAGE_PIXELS / pixels) ** 0.5
+                    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
                     images.append(pix.tobytes("png"))
                     del pix  # unkomprimierte Pixeldaten sofort freigeben
         except Exception as e:
@@ -168,8 +207,8 @@ def extract_document_text(stored_path: str) -> str:
     extrahierbar ist (gescannte PDFs ohne Textlayer, Bilder).
     """
     base = settings.documents_dir.resolve()
-    path = Path(stored_path).resolve()
-    if not path.is_relative_to(base):
+    path = resolve_stored_path(stored_path, base)
+    if path is None:
         raise StorageError("Pfad außerhalb des Dokumentenverzeichnisses")
     if not path.exists():
         raise StorageError(f"Datei nicht gefunden: {path.name}")

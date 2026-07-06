@@ -43,13 +43,31 @@ Nach dem Start zeigt die Anwendung links die Hauptnavigation:
 - Dashboard
 - Versicherungen
 - Produkte / Garantien
+- Rechnungen
 - Kalender
+- Erinnerungen
 - Dokument hochladen
 - Assistent
 
 Auf kleineren Bildschirmen öffnest du die Navigation über das Menü-Symbol oben links.
 
-Zusätzlich gibt es oben den Schnellzugriff **Schnell hochladen**.
+Zusätzlich gibt es oben den Schnellzugriff **Schnell hochladen** und den
+**Dark-Mode-Umschalter** (Mond-/Sonnen-Symbol). Beim ersten Besuch folgt das
+Design automatisch der Einstellung deines Geräts; deine Wahl wird gespeichert.
+
+In der oberen Leiste findest du außerdem die **globale Suche** (ab
+Tablet-Breite): Tippe einen Vertrags- oder Produktnamen ein und spring mit
+einem Klick direkt zur passenden Seite.
+
+### App auf dem Handy installieren
+
+Die Anwendung ist als Web-App installierbar:
+
+- **Android (Chrome):** Menü → „App installieren" bzw. „Zum Startbildschirm hinzufügen"
+- **iPhone/iPad (Safari):** Teilen-Symbol → „Zum Home-Bildschirm"
+
+Danach startet sie mit eigenem Symbol im Vollbild wie eine normale App
+(funktioniert nur, solange du im Heimnetz bist).
 
 ## Empfohlener Arbeitsablauf
 
@@ -71,10 +89,18 @@ Das Dashboard ist die Startseite für den schnellen Überblick.
 
 Hier siehst du:
 - wie viele Versicherungen aktuell erfasst sind
-- die monatlichen Gesamtkosten
+- die monatlichen Gesamtkosten (bei Personen-Labels auch je Person)
 - den nächsten bekannten Ablauf
-- den Status vorhandener Garantien
-- eine Übersicht der nächsten Fristen
+- den Status vorhandener Garantien und den erfassten Warenwert
+- die **Kostenentwicklung** deiner Jahresprämien über die Zeit (sobald
+  Prämienänderungen erfasst sind)
+- eine Übersicht der nächsten Abläufe
+- die nächsten **Kündigungsfristen** („kündbar bis") — damit du rechtzeitig
+  kündigen oder wechseln kannst
+
+Über den **Backup**-Button lädst du eine komplette Datensicherung als
+ZIP-Datei herunter (Datenbank + alle Dokumente und Belege) — ideal, um sie
+regelmäßig auf eine externe Platte oder in einen Cloud-Speicher zu legen.
 
 Typische Nutzung:
 - Prüfen, ob bald Verträge auslaufen
@@ -92,8 +118,11 @@ Erlaubt sind:
 - PNG
 - JPEG
 
+Auf dem Handy kannst du mit **„Mit Kamera aufnehmen"** das Dokument direkt
+abfotografieren (auch beim Rechnungs-Upload).
+
 Maximalgröße:
-- 10 MB
+- 80 MB (Versicherungsdokumente), Rechnungen bis 10 MB
 
 #### Schritt 2: Analyse starten
 
@@ -111,6 +140,18 @@ Die Anwendung versucht unter anderem folgende Werte zu erkennen:
 #### Schritt 3: Vorschau prüfen
 
 Nach der Analyse erscheint eine Extraktionsvorschau.
+
+**Duplikat-Hinweis:** Erkennt die Anwendung, dass die Vertragsnummer bereits zu
+einem gespeicherten Vertrag gehört (typisch bei der jährlich neuen Police),
+erscheint oben ein Hinweis mit zwei Möglichkeiten:
+
+- **Anhängen + Laufzeit/Prämie aktualisieren** — das Dokument wird an den
+  bestehenden Vertrag gehängt und Laufzeit, Prämie und Kündigungsdaten werden
+  aus der Vorschau übernommen (empfohlen bei Vertragsverlängerung)
+- **Nur Dokument anhängen** — der Vertrag bleibt unverändert
+
+So entstehen keine doppelten Verträge. Du kannst den Hinweis auch ignorieren
+und bewusst einen neuen Vertrag anlegen.
 
 Prüfe besonders:
 - Versicherer
@@ -157,6 +198,18 @@ Wenn der Vorschlag nicht passt, klicke auf **Verwerfen** und starte mit einer an
    - Notizen
 4. Klicke auf **Speichern**
 
+#### Datenlücken erkennen
+
+Verträge mit unvollständigen Daten zeigen ein oranges Warnsymbol neben dem Namen
+(bzw. Hinweiszeilen in der mobilen Ansicht). Gemeldet wird:
+
+- keine Frist hinterlegt (weder Enddatum noch Kündigungsfrist) — es können
+  **keine Erinnerungen** gesendet werden
+- keine Prämie — der Vertrag fehlt in der Kostenübersicht
+- kein Dokument — der Assistent kann nichts dazu finden
+
+Das Dashboard fasst zusammen, wie viele Verträge betroffen sind.
+
 #### Vorhandene Versicherung suchen
 
 Nutze das Suchfeld, um nach folgenden Werten zu filtern:
@@ -172,9 +225,54 @@ Nutze das Suchfeld, um nach folgenden Werten zu filtern:
 - **Läuft bald ab**
 - **Abgelaufen**
 
+#### Vertrags-Detailseite
+
+Klicke auf den **Namen** eines Vertrags, um seine Detailseite zu öffnen. Dort
+findest du alles auf einen Blick: Stammdaten, Restlaufzeit und Kündigungsfrist,
+den **Prämienverlauf** als Zeitleiste, alle Dokumente (ansehen, ergänzen,
+löschen) und die KI-Empfehlung mit „Neu bewerten". Über **„Frage zum Vertrag"**
+springst du direkt in den Assistenten — mit vorbefülltem Bezug zum Vertrag
+(gleiches gibt es auf der Produkt-Detailseite).
+
+#### Verträge Personen zuordnen (Familie)
+
+Im Bearbeiten-Formular gibt es das Feld **„Gehört zu"** — ein freies Label wie
+„Christian" oder „Anna" (kein Login, nur eine Beschriftung). Sobald Labels
+vergeben sind:
+- erscheinen sie als **Filter-Chips** über der Vertragsliste
+- steht die Person als Chip am Vertrag
+- zeigt das Dashboard die **Kosten je Person**
+- kann der Assistent Fragen wie „Welche Versicherungen gehören zu Anna?" beantworten
+
+#### Versehentlich gelöscht? Rückgängig!
+
+Nach dem Löschen eines Vertrags oder Produkts erscheint unten 5 Sekunden lang
+eine Meldung mit **„Rückgängig"** — ein Klick stellt den Eintrag wieder her.
+Erst danach wird endgültig gelöscht.
+
 #### Versicherung bearbeiten
 
-Klicke in der Tabelle auf das Stift-Symbol.
+Klicke in der Tabelle auf das Stift-Symbol (oder auf der Detailseite auf
+**Bearbeiten**).
+
+In der Prämien-Spalte siehst du zusätzlich die Jahresprämie und den Anteil an
+deinen Gesamtkosten (z. B. „311,00 € p.a. · 28 % der Gesamtkosten").
+
+#### Beitragserhöhungen erkennen (Prämienverlauf)
+
+Wenn du beim Bearbeiten die Prämie änderst (z. B. nach der jährlichen
+Beitragsanpassung), merkt sich die Anwendung den alten Wert. In Liste und
+Detailseite erscheint dann ein Trend-Chip wie **„+18 % seit 2024"** — rot bei
+Erhöhungen, grün bei Senkungen. Die Entwicklung fließt auch in die
+KI-Empfehlung ein.
+
+#### Dokumente ansehen und ergänzen
+
+Klicke auf das Büroklammer-Symbol. Im Dialog kannst du:
+- vorhandene Dokumente **im Browser öffnen** (Symbol „in neuem Tab öffnen")
+- neue Unterlagen anhängen, z. B. die jährliche Beitragsrechnung — sie werden
+  automatisch für den Assistenten durchsuchbar gemacht
+- einzelne Dokumente löschen
 
 #### Empfehlung abrufen
 
@@ -190,7 +288,7 @@ Im Bereich **Versicherungen** stehen direkte Exporte zur Verfügung:
 - **PDF**
 - **Excel**
 
-### 5. Rechnungen und Kaufbelege verwalten
+### 4. Rechnungen und Kaufbelege verwalten
 
 Öffne **Rechnungen & Kaufbelege**.
 
@@ -200,10 +298,15 @@ können erst nach Ablauf der Aufbewahrungsfrist gelöscht werden.
 #### Rechnung hochladen
 
 1. Klicke auf **Rechnung hochladen**
-2. Wähle das zugehörige Produkt aus
-3. Wähle die Datei aus (PDF, PNG oder JPEG, max. 10 MB)
-4. Trage bei Bedarf Kaufdatum und Betrag ein
-5. Klicke auf **Hochladen**
+2. Wähle die Datei aus (PDF, PNG oder JPEG, max. 10 MB) — die KI liest Kaufdatum,
+   Betrag, Produktname und (falls auf dem Beleg genannt) die **Garantiedauer** aus
+3. Wähle das zugehörige Produkt aus oder lege es direkt neu an — bei erkannter
+   Garantiedauer wird das Garantieende automatisch vorbefüllt
+   (z. B. „3 Jahre Herstellergarantie" statt pauschal +2 Jahre)
+4. Prüfe die Felder und klicke auf **Hochladen**
+
+Belege kannst du jederzeit **im Browser ansehen** (Symbol „in neuem Tab öffnen")
+oder herunterladen.
 
 Die Aufbewahrungsfrist wird automatisch berechnet:
 `max(Kaufdatum + 730 Tage, Garantieende des Produkts)`
@@ -222,6 +325,12 @@ Solange das Datum in der Zukunft liegt, wird ein Hinweis mit dem Fristende angez
 
 ### 5. Produkte und Garantien verwalten
 
+#### Produkt-Detailseite
+
+Klicke auf den **Namen** eines Produkts, um seine Detailseite zu öffnen: Stammdaten
+mit Seriennummer, Restgarantie als Fortschrittsbalken, verknüpfte Versicherung und
+**alle Kaufbelege** direkt darunter (ansehen, hochladen, löschen).
+
 #### Produkte suchen und filtern
 
 Suche möglich nach:
@@ -233,6 +342,7 @@ Filter möglich nach:
 - alle
 - läuft bald ab
 - abgelaufen
+- Archiv (erscheint, sobald archivierte Produkte existieren)
 
 #### Produkt bearbeiten oder löschen
 
@@ -240,6 +350,20 @@ Nutze in der Tabelle das Stift- oder Papierkorb-Symbol.
 
 Hinweis: Beim Löschen eines Produkts werden **alle zugehörigen Rechnungen mitgelöscht** —
 unabhängig von deren Aufbewahrungsfrist.
+
+#### Produkt archivieren statt löschen
+
+Wenn du ein Gerät **verkauft oder entsorgt** hast, ist Archivieren (auf der
+Detailseite) die bessere Wahl: Das Produkt verschwindet aus den aktiven Listen,
+der Garantie-Ampel und den Erinnerungen — die Kaufbelege bleiben aber bis zum
+Ende ihrer Aufbewahrungsfrist erhalten. Über den Archiv-Filter findest du es
+jederzeit wieder und kannst es reaktivieren.
+
+#### Datenlücken erkennen
+
+Produkte mit fehlendem **Kaufbeleg** (im Garantiefall dein Nachweis!),
+Garantieende oder Kaufdatum zeigen ein oranges Warnsymbol. Das Dashboard fasst
+zusammen, wie viele Produkte betroffen sind.
 
 #### Excel-Export
 
@@ -259,7 +383,36 @@ Der Kalender hilft dabei:
 Hinweis:
 - Nur Einträge mit vollständigen Datumsangaben werden dargestellt.
 
-### 7. Chat-Assistent verwenden
+#### Fristen im eigenen Kalender abonnieren
+
+Unter dem Zeitstrahl findest du die Karte **Im eigenen Kalender abonnieren**
+mit einer Kalender-Adresse (ICS). Wenn du sie in deiner Kalender-App abonnierst,
+erscheinen alle Vertragsabläufe, Garantieenden und jährlichen Kündigungsfristen
+automatisch im Handy- oder Familienkalender und bleiben aktuell:
+
+- **Apple Kalender (Mac):** Ablage → Neues Kalenderabonnement → Adresse einfügen
+- **iPhone:** Einstellungen → Kalender → Accounts → Account hinzufügen → Andere →
+  Kalenderabo hinzufügen
+- **Google Kalender (Web):** Weitere Kalender → „+" → Per URL
+- **Thunderbird:** Neuer Kalender → Im Netzwerk → iCalendar (ICS)
+
+Die Adresse funktioniert nur für Geräte im Heimnetz.
+
+### 7. Erinnerungen prüfen und Pushover testen
+
+Öffne **Erinnerungen**.
+
+Hier siehst du den Verlauf aller Frist-Warnungen mit Status:
+
+- **gesendet** — die Push-Nachricht ist raus
+- **ausstehend** — wird beim nächsten Lauf (täglich 8:00 Uhr) gesendet
+- **fehlgeschlagen** — Versand hat nicht geklappt (wird bis 3 Tage lang erneut
+  versucht); die Fehlermeldung steht dabei
+
+Mit **Test-Push senden** prüfst du sofort, ob Pushover richtig konfiguriert ist —
+so fällt ein Konfigurationsfehler auf, bevor eine echte Frist verpasst wird.
+
+### 8. Chat-Assistent verwenden
 
 Öffne **Assistent**.
 
@@ -279,12 +432,21 @@ einen lesbaren Textlayer hatte oder erfolgreich per OCR erkannt wurde.
 
 Senden kannst du per:
 - Klick auf das Sende-Symbol
-- `Strg + Enter`
-- `⌘ + Enter`
+- `Enter` (`Shift + Enter` für eine neue Zeile)
+
+Der Chatverlauf bleibt beim Wechseln zwischen den Seiten erhalten. Mit
+**Neuer Chat** startest du eine frische Unterhaltung.
 
 #### Beispiel-Fragen nutzen
 
 Beim ersten Öffnen zeigt die Ansicht Beispiel-Fragen an. Ein Klick übernimmt die Frage ins Eingabefeld.
+
+#### Suchindex prüfen
+
+Über **Suchindex prüfen** (oben rechts im Assistenten) kannst du kontrollieren,
+ob alle hochgeladenen Dokumente für die Suche indiziert sind. Fehlende Dokumente
+werden automatisch nachindiziert — das kann einige Minuten dauern. Nützlich,
+wenn der Assistent ein Dokument nicht zu kennen scheint.
 
 #### Antworten verstehen
 
@@ -344,13 +506,23 @@ Die Dokumentanalyse und der Chat können Konfidenzwerte anzeigen:
 2. Formuliere deine Frage in Alltagssprache
 3. Prüfe Antwort, Quellen und Konfidenz
 
+### Ich möchte Fristen auf dem Handy sehen
+
+1. Öffne **Kalender**
+2. Kopiere die Adresse unter **Im eigenen Kalender abonnieren**
+3. Abonniere sie in deiner Kalender-App (siehe Anleitung im Kalender-Bereich)
+
+Zusätzlich sendet die Anwendung automatisch Pushover-Benachrichtigungen:
+- 90/30/7 Tage vor Vertragsablauf bzw. Garantieende
+- 30/7 Tage vor einer Kündigungsfrist („kündbar bis") — jedes Jahr aufs Neue
+
 ## Fehlerbehebung
 
 ### Upload funktioniert nicht
 
 Prüfe:
 - ob die Datei PDF, PNG oder JPEG ist
-- ob die Datei kleiner als 10 MB ist
+- ob die Datei unter dem Limit liegt (Dokumente 80 MB, Rechnungen 10 MB)
 - ob Backend und Frontend laufen
 
 ### Daten fehlen im Kalender
@@ -370,7 +542,12 @@ Prüfe:
 Prüfe:
 - ob bereits Versicherungen oder Produkte gespeichert wurden
 - ob die Frage konkret genug formuliert ist
-- ob die Quellen zur Antwort angezeigt werden- ob das hochgeladene Dokument einen Textlayer enthielt (bei gescannten PDFs wird automatisch Vision-OCR verwendet; bei sehr schlechter Bildqualität kann die Erkennung unvollständig sein)
+- ob die Quellen zur Antwort angezeigt werden
+- ob das hochgeladene Dokument einen Textlayer enthielt (bei gescannten PDFs wird
+  automatisch Vision-OCR verwendet; bei sehr schlechter Bildqualität kann die
+  Erkennung unvollständig sein)
+- ob alle Dokumente indiziert sind: im Assistenten **Suchindex prüfen** ausführen
+
 ## Zusätzliche Dokumentation
 
 Für technische Details und die Struktur des Frontends:

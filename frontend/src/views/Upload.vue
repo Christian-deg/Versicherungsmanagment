@@ -20,12 +20,32 @@
           v-model="files"
           label="PDF oder Foto (JPEG/PNG) — Police oder Rechnung"
           accept="application/pdf,image/png,image/jpeg"
-          prepend-icon="mdi-camera"
+          prepend-icon="mdi-paperclip"
           show-size
           multiple
           hint="Versicherungsdokumente bis 80 MB, Rechnungen bis 10 MB. Mehrere Dateien möglich – die erste wird von der KI analysiert."
           persistent-hint
           :disabled="loading"
+        />
+        <!-- Mobil: Dokument direkt mit der Kamera abfotografieren -->
+        <v-btn
+          v-if="smAndDown"
+          variant="outlined"
+          prepend-icon="mdi-camera"
+          class="mt-3"
+          block
+          :disabled="loading"
+          @click="cameraInput?.click()"
+        >
+          Mit Kamera aufnehmen
+        </v-btn>
+        <input
+          ref="cameraInput"
+          type="file"
+          accept="image/*"
+          capture="environment"
+          class="d-none"
+          @change="onCameraCapture"
         />
         <v-btn
           color="primary"
@@ -39,6 +59,10 @@
           {{ uploadLabel }}
         </v-btn>
         <v-progress-linear v-if="loading" indeterminate color="primary" class="mt-3" />
+        <p v-if="loadingPhase === 'analyzing'" class="text-caption text-medium-emphasis mt-2 mb-0">
+          Bei gescannten Dokumenten mit vielen Seiten kann die Analyse einige Minuten dauern —
+          die Seite einfach geöffnet lassen.
+        </p>
 
         <v-alert v-if="typeChoice" type="info" variant="tonal" class="mt-3">
           Der Dokumenttyp konnte nicht eindeutig erkannt werden. Wie soll die Datei verarbeitet werden?
@@ -65,6 +89,22 @@
         </v-chip>
       </v-card-title>
       <v-card-text>
+        <v-alert v-if="duplicateOf" type="warning" variant="tonal" class="mb-3">
+          <strong>Diesen Vertrag gibt es schon:</strong> Die Vertragsnummer gehört bereits zu
+          „{{ duplicateOf.name }}" ({{ duplicateOf.versicherer }}). Du kannst das Dokument dort
+          anhängen, statt einen doppelten Vertrag anzulegen — typisch bei der jährlich neuen Police.
+          <div class="d-flex flex-wrap ga-2 mt-2">
+            <v-btn size="small" color="primary" :loading="assigning" @click="assignToExisting(true)">
+              Anhängen + Laufzeit/Prämie aktualisieren
+            </v-btn>
+            <v-btn size="small" variant="outlined" :loading="assigning" @click="assignToExisting(false)">
+              Nur Dokument anhängen
+            </v-btn>
+          </div>
+          <div class="text-caption mt-2">
+            Oder unten normal fortfahren, um trotzdem einen neuen Vertrag anzulegen.
+          </div>
+        </v-alert>
         <v-alert v-if="preview.hinweise" type="info" variant="tonal" class="mb-3">{{ preview.hinweise }}</v-alert>
         <v-row class="mb-1">
           <v-col cols="12" md="4">
@@ -138,7 +178,7 @@
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDisplay } from 'vuetify'
-import { documentsApi } from '../api'
+import { documentsApi, insurancesApi } from '../api'
 import { insuranceCategories, paymentIntervals } from '../constants'
 import { useTransferStore } from '../stores/transfer'
 import { confidenceColor, formatRecurringDate, parseRecurringDate } from '../utils'
@@ -156,6 +196,17 @@ const nameManuallyEdited = ref(false)
 const extraDocumentIds = ref([])
 const kuendigungBisInput = ref('')
 const kuendigungZumInput = ref('')
+// Duplikat-Erkennung: bestehender Vertrag mit derselben Vertragsnummer
+const duplicateOf = ref(null)
+const assigning = ref(false)
+// Mobil: verstecktes Kamera-Input (capture="environment" öffnet direkt die Rückkamera)
+const cameraInput = ref(null)
+
+function onCameraCapture(event) {
+  const foto = event.target.files?.[0]
+  if (foto) files.value = [foto]
+  event.target.value = ''
+}
 
 const recurringDateRule = (v) =>
   parseRecurringDate(v) !== undefined || 'Format TT.MM., z. B. 30.09.'
@@ -252,6 +303,18 @@ async function analyzeAsInsurance() {
       preview.value.kuendigung_zum_tag, preview.value.kuendigung_zum_monat
     )
 
+    // Duplikat-Check: existiert schon ein Vertrag mit dieser Vertragsnummer?
+    duplicateOf.value = null
+    const nummer = normalizeNumber(preview.value.vertragsnummer)
+    if (nummer) {
+      try {
+        const existing = await insurancesApi.list()
+        duplicateOf.value = existing.find((i) => normalizeNumber(i.vertragsnummer) === nummer) || null
+      } catch {
+        // Duplikat-Check ist nur Komfort — Fehler nicht in den Upload-Flow durchreichen
+      }
+    }
+
     // Weitere Dateien ohne KI-Analyse hochladen
     const allFiles = Array.isArray(files.value) ? files.value : [files.value]
     const remaining = allFiles.slice(1).filter(Boolean)
@@ -326,6 +389,76 @@ function reset() {
   nameManuallyEdited.value = false
   kuendigungBisInput.value = ''
   kuendigungZumInput.value = ''
+  duplicateOf.value = null
+}
+
+// Vertragsnummern normalisieren (Leerzeichen/Trennzeichen und Groß-/Kleinschreibung ignorieren)
+function normalizeNumber(value) {
+  return String(value || '').replace(/[\s\-./]/g, '').toLowerCase()
+}
+
+/**
+ * Dokument (plus evtl. Zusatzdokumente) an den bestehenden Vertrag anhängen.
+ * updateFields=true übernimmt zusätzlich Laufzeit/Prämie/Kündigung aus der
+ * (ggf. korrigierten) Vorschau in den bestehenden Vertrag.
+ */
+async function assignToExisting(updateFields) {
+  assigning.value = true
+  try {
+    await documentsApi.assign(preview.value.document_id, duplicateOf.value.id)
+    const failedExtras = []
+    for (const extraId of extraDocumentIds.value) {
+      try {
+        await documentsApi.assign(extraId, duplicateOf.value.id)
+      } catch {
+        failedExtras.push(extraId)
+      }
+    }
+
+    if (updateFields) {
+      const bis = parseRecurringDate(kuendigungBisInput.value)
+      const zum = parseRecurringDate(kuendigungZumInput.value)
+      const alt = duplicateOf.value
+      await insurancesApi.update(alt.id, {
+        name: alt.name,
+        kategorie: alt.kategorie,
+        versicherer: alt.versicherer,
+        vertragsnummer: alt.vertragsnummer,
+        start_date: preview.value.start_date || alt.start_date,
+        end_date: preview.value.end_date || alt.end_date,
+        praemie_eur:
+          preview.value.praemie_eur === '' || preview.value.praemie_eur == null
+            ? alt.praemie_eur
+            : preview.value.praemie_eur,
+        zahlungsintervall:
+          preview.value.zahlungsintervall && preview.value.zahlungsintervall !== 'unbekannt'
+            ? preview.value.zahlungsintervall
+            : alt.zahlungsintervall,
+        kuendigung_bis_tag: bis?.tag ?? alt.kuendigung_bis_tag,
+        kuendigung_bis_monat: bis?.monat ?? alt.kuendigung_bis_monat,
+        kuendigung_zum_tag: zum?.tag ?? alt.kuendigung_zum_tag,
+        kuendigung_zum_monat: zum?.monat ?? alt.kuendigung_zum_monat,
+        notes: alt.notes,
+      })
+    }
+
+    if (failedExtras.length) {
+      snack.value = {
+        show: true,
+        color: 'warning',
+        text: `${failedExtras.length} Zusatzdokument(e) konnten nicht angehängt werden.`,
+      }
+    }
+    await router.push({ path: '/insurances', query: { saved: '1' } })
+  } catch (e) {
+    snack.value = {
+      show: true,
+      color: 'error',
+      text: e.response?.data?.detail || e.message || 'Anhängen fehlgeschlagen',
+    }
+  } finally {
+    assigning.value = false
+  }
 }
 
 function defaultPolicyName() {

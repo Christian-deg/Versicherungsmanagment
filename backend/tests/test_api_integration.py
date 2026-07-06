@@ -471,6 +471,406 @@ def test_attach_document_insurance_not_found() -> None:
     assert r.status_code == 404
 
 
+def test_document_file_inline_view() -> None:
+    """GET /documents/{id}/file liefert die Datei inline; fehlende Datei → 410."""
+    from pathlib import Path
+
+    from app.config import settings
+    from app.models.database import SessionLocal
+    from app.models.models import Document
+
+    docs_dir = settings.documents_dir.resolve()
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    f = docs_dir / "test_view.pdf"
+    f.write_bytes(b"%PDF-1.4 testinhalt")
+
+    with SessionLocal() as db:
+        doc = Document(
+            insurance_id=None,
+            original_filename="police.pdf",
+            stored_path=str(f),
+            mime_type="application/pdf",
+        )
+        db.add(doc)
+        db.commit()
+        doc_id = doc.id
+
+    r = client.get(f"/api/documents/{doc_id}/file")
+    assert r.status_code == 200
+    assert r.content == b"%PDF-1.4 testinhalt"
+    assert "inline" in r.headers["content-disposition"]
+    assert r.headers["content-type"].startswith("application/pdf")
+
+    # Datei weg → 410, kein 500
+    f.unlink()
+    assert client.get(f"/api/documents/{doc_id}/file").status_code == 410
+    client.delete(f"/api/documents/{doc_id}")
+
+    # Pfad außerhalb des Dokumentenverzeichnisses → 410 (kein Traversal möglich)
+    with SessionLocal() as db:
+        evil = Document(
+            insurance_id=None,
+            original_filename="x.pdf",
+            stored_path=str(Path(__file__).resolve()),
+            mime_type="application/pdf",
+        )
+        db.add(evil)
+        db.commit()
+        evil_id = evil.id
+    assert client.get(f"/api/documents/{evil_id}/file").status_code == 410
+    client.delete(f"/api/documents/{evil_id}")
+
+    assert client.get("/api/documents/999999/file").status_code == 404
+
+
+def test_document_file_resolves_docker_paths() -> None:
+    """Dokumente mit Container-Pfaden (/app/data/…) sind auch lokal abrufbar —
+    die Dateien sind per Volume dieselben, nur der Pfad-Präfix unterscheidet sich."""
+    from app.config import settings
+    from app.models.database import SessionLocal
+    from app.models.models import Document
+
+    docs_dir = settings.documents_dir.resolve()
+    sub = docs_dir / "KFZ" / "TestVers" / "2026"
+    sub.mkdir(parents=True, exist_ok=True)
+    f = sub / "docker_doc.pdf"
+    f.write_bytes(b"%PDF-1.4 aus docker")
+
+    with SessionLocal() as db:
+        doc = Document(
+            insurance_id=None,
+            original_filename="police.pdf",
+            stored_path="/app/data/documents/KFZ/TestVers/2026/docker_doc.pdf",
+            mime_type="application/pdf",
+        )
+        db.add(doc)
+        db.commit()
+        doc_id = doc.id
+
+    r = client.get(f"/api/documents/{doc_id}/file")
+    assert r.status_code == 200
+    assert r.content == b"%PDF-1.4 aus docker"
+
+    # Traversal über den Umgebungs-Fallback bleibt blockiert
+    from app.services.storage_service import resolve_stored_path
+
+    assert resolve_stored_path("/etc/passwd", docs_dir) is None
+    assert resolve_stored_path("/app/data/documents/../../secret.txt", docs_dir) is None
+
+    f.unlink()
+    client.delete(f"/api/documents/{doc_id}")
+
+
+def test_calendar_ics_feed() -> None:
+    """ICS-Feed enthält Ablauf-, Garantie- und wiederkehrende Kündigungs-Termine."""
+    payload = {
+        **_INSURANCE_PAYLOAD,
+        "name": "ICS; Test, KFZ",  # Sonderzeichen → müssen escaped werden
+        "kuendigung_bis_tag": 30,
+        "kuendigung_bis_monat": 9,
+    }
+    r = client.post("/api/insurances", json=payload)
+    ins_id = r.json()["id"]
+    r = client.post(
+        "/api/products",
+        json={"name": "ICS Laptop", "kategorie": "Elektronik", "warranty_end": "2027-06-30"},
+    )
+    product_id = r.json()["id"]
+
+    r = client.get("/api/exports/calendar.ics")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/calendar")
+    body = r.text
+    assert body.startswith("BEGIN:VCALENDAR")
+    assert body.rstrip().endswith("END:VCALENDAR")
+    # Entfaltete Version prüfen (RFC-5545-Zeilenfaltung rückgängig machen)
+    unfolded = body.replace("\r\n ", "")
+    assert f"insurance-{ins_id}-ablauf@versicherungs-assistent" in unfolded
+    assert f"insurance-{ins_id}-kuendigung@versicherungs-assistent" in unfolded
+    assert f"product-{product_id}-garantie@versicherungs-assistent" in unfolded
+    assert "RRULE:FREQ=YEARLY" in unfolded
+    assert "ICS\\; Test\\, KFZ" in unfolded  # Escaping der Nutzereingaben
+
+    client.delete(f"/api/insurances/{ins_id}")
+    client.delete(f"/api/products/{product_id}")
+
+
+def test_reindex_missing_documents(mocker) -> None:
+    """Konsistenz-Check: Dokumente ohne Index-Einträge werden neu eingebettet."""
+    from app.config import settings
+    from app.models.database import SessionLocal
+    from app.models.models import Document
+
+    embedded: list[int] = []
+
+    async def _fake_embed(insurance_id: int, document_id: int, base_text: str, stored_path: str) -> None:
+        embedded.append(document_id)
+
+    mocker.patch("app.api.documents._embed_document_task", _fake_embed)
+
+    r = client.post("/api/insurances", json=_INSURANCE_PAYLOAD)
+    ins_id = r.json()["id"]
+    with SessionLocal() as db:
+        doc = Document(
+            insurance_id=ins_id,
+            original_filename="reindex.pdf",
+            stored_path=str(settings.documents_dir / "reindex_test.pdf"),
+            mime_type="application/pdf",
+        )
+        db.add(doc)
+        db.commit()
+        doc_id = doc.id
+
+    r = client.post("/api/documents/maintenance/reindex")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["dokumente"] >= 1
+    assert data["fehlend"] >= 1
+    assert doc_id in embedded
+
+    client.delete(f"/api/insurances/{ins_id}")
+
+
+def test_assign_document_to_existing_insurance(mocker) -> None:
+    """Duplikat-Erkennung: analysiertes Dokument wird bestehendem Vertrag zugeordnet."""
+    from app.config import settings
+    from app.models.database import SessionLocal
+    from app.models.models import Document
+
+    embedded: list[int] = []
+
+    async def _fake_embed(insurance_id: int, document_id: int, base_text: str, stored_path: str) -> None:
+        embedded.append(document_id)
+
+    mocker.patch("app.api.documents._embed_document_task", _fake_embed)
+
+    r = client.post("/api/insurances", json=_INSURANCE_PAYLOAD)
+    ins_id = r.json()["id"]
+
+    # Unbestätigtes Dokument in _incoming (wie nach /upload)
+    incoming = settings.documents_dir.resolve() / "_incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    src = incoming / "assign_test.pdf"
+    src.write_bytes(b"%PDF-1.4 assigntest")
+    with SessionLocal() as db:
+        doc = Document(
+            insurance_id=None,
+            original_filename="neue_police.pdf",
+            stored_path=str(src),
+            mime_type="application/pdf",
+        )
+        db.add(doc)
+        db.commit()
+        doc_id = doc.id
+
+    r = client.post(f"/api/documents/assign/{doc_id}", json={"insurance_id": ins_id})
+    assert r.status_code == 200
+    assert r.json()["insurance_id"] == ins_id
+    assert doc_id in embedded  # Hintergrund-Indizierung angestoßen
+    assert not src.exists()  # Datei wurde aus _incoming verschoben
+    with SessionLocal() as db:
+        moved = db.get(Document, doc_id)
+        assert "_incoming" not in moved.stored_path
+
+    # Bereits zugeordnete Dokumente können nicht erneut zugeordnet werden
+    r = client.post(f"/api/documents/assign/{doc_id}", json={"insurance_id": ins_id})
+    assert r.status_code == 400
+
+    client.delete(f"/api/insurances/{ins_id}")
+
+
+def test_notifications_list_and_test_push(mocker) -> None:
+    """Erinnerungs-Verlauf ist abrufbar; Test-Push meldet Erfolg und Fehler sauber."""
+    r = client.get("/api/notifications")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+
+    # Ohne Pushover-Konfiguration → 400 mit verständlicher Meldung
+    from app.config import settings
+
+    mocker.patch.object(settings, "pushover_user_key", "")
+    r = client.post("/api/notifications/test")
+    assert r.status_code == 400
+
+    # Mit Konfiguration und funktionierendem Pushover → ok
+    mocker.patch.object(settings, "pushover_user_key", "user")
+    mocker.patch.object(settings, "pushover_app_token", "token")
+    sent: list[str] = []
+
+    async def _fake_push(*, title: str, message: str, priority: int = 0, **kwargs) -> None:
+        sent.append(title)
+
+    mocker.patch("app.api.notifications.send_push", _fake_push)
+    r = client.post("/api/notifications/test")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+    assert sent
+
+    # Pushover-Fehler → 502
+    from app.services.pushover_service import PushoverError
+
+    async def _failing_push(**kwargs) -> None:
+        raise PushoverError("simulierter Ausfall")
+
+    mocker.patch("app.api.notifications.send_push", _failing_push)
+    r = client.post("/api/notifications/test")
+    assert r.status_code == 502
+
+
+def test_premium_history_recorded_on_create_and_update() -> None:
+    """Prämienverlauf: Startwert bei Anlage, neuer Eintrag nur bei echter Änderung."""
+    r = client.post("/api/insurances", json={**_INSURANCE_PAYLOAD, "praemie_eur": 500})
+    ins_id = r.json()["id"]
+
+    def _history() -> list[dict]:
+        rows = client.get("/api/insurances/history/premiums").json()
+        return [x for x in rows if x["insurance_id"] == ins_id]
+
+    assert len(_history()) == 1
+    assert _history()[0]["praemie_eur"] == 500
+
+    # Update ohne Prämienänderung → kein neuer Eintrag
+    payload = {**_INSURANCE_PAYLOAD, "praemie_eur": 500, "name": "Umbenannt"}
+    client.put(f"/api/insurances/{ins_id}", json=payload)
+    assert len(_history()) == 1
+
+    # Beitragserhöhung → neuer Eintrag
+    payload["praemie_eur"] = 590
+    client.put(f"/api/insurances/{ins_id}", json=payload)
+    hist = _history()
+    assert len(hist) == 2
+    assert hist[-1]["praemie_eur"] == 590
+
+    # Löschen entfernt auch den Verlauf
+    client.delete(f"/api/insurances/{ins_id}")
+    assert _history() == []
+
+
+def test_premium_trend_in_recommendation_summary() -> None:
+    """Beitragserhöhungen fließen als Prämienentwicklung in die Empfehlungs-Zusammenfassung ein."""
+    from app.models.database import SessionLocal
+    from app.models.models import Insurance
+    from app.services.recommendation_service import _build_summary, _premium_trend
+
+    r = client.post("/api/insurances", json={**_INSURANCE_PAYLOAD, "praemie_eur": 600})
+    ins_id = r.json()["id"]
+    client.put(f"/api/insurances/{ins_id}", json={**_INSURANCE_PAYLOAD, "praemie_eur": 732})
+
+    with SessionLocal() as db:
+        ins = db.get(Insurance, ins_id)
+        trend = _premium_trend(db, ins)
+        assert trend is not None
+        assert "+22%" in trend
+        assert "Prämienentwicklung" in _build_summary(ins, trend)
+        # Ohne Verlauf (nur ein Eintrag) → kein Trend
+        assert "Prämienentwicklung" not in _build_summary(ins, None)
+
+    client.delete(f"/api/insurances/{ins_id}")
+
+
+def test_invoice_file_inline_view(mocker) -> None:
+    """GET /invoices/{id}/file liefert den Beleg inline (Browser-Ansicht)."""
+    from datetime import date, timedelta
+
+    from app.config import settings
+    from app.models.database import SessionLocal
+    from app.models.models import Invoice
+
+    r = client.post("/api/products", json={"name": "Beleg-Testgerät", "kategorie": "Elektronik"})
+    product_id = r.json()["id"]
+
+    inv_dir = settings.invoices_dir.resolve() / "Beleg-Testgeraet" / "2026"
+    inv_dir.mkdir(parents=True, exist_ok=True)
+    f = inv_dir / "beleg_view.pdf"
+    f.write_bytes(b"%PDF-1.4 beleginhalt")
+    with SessionLocal() as db:
+        inv = Invoice(
+            product_id=product_id,
+            original_filename="beleg.pdf",
+            stored_path=str(f),
+            mime_type="application/pdf",
+            retain_until=date.today() + timedelta(days=1),
+        )
+        db.add(inv)
+        db.commit()
+        inv_id = inv.id
+
+    r = client.get(f"/api/invoices/{inv_id}/file")
+    assert r.status_code == 200
+    assert r.content == b"%PDF-1.4 beleginhalt"
+    assert "inline" in r.headers["content-disposition"]
+
+    f.unlink()
+    assert client.get(f"/api/invoices/{inv_id}/file").status_code == 410
+    client.delete(f"/api/products/{product_id}")  # räumt Produkt + Rechnung auf
+
+
+def test_invoice_analysis_includes_warranty_months(mocker) -> None:
+    """Die Beleg-Analyse liefert die erkannte Garantiedauer (garantie_monate) mit."""
+    from app.agents.invoice_agent import InvoiceExtraction
+
+    async def _fake_analyze(images):
+        return InvoiceExtraction(amount_eur=499.0, produkt_name="Testgerät", garantie_monate=36)
+
+    mocker.patch("app.api.invoices.analyze_invoice", _fake_analyze)
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+    r = client.post("/api/invoices/analyze", files={"file": ("beleg.png", png_bytes, "image/png")})
+    assert r.status_code == 200
+    assert r.json()["garantie_monate"] == 36
+
+
+def test_archived_product_excluded_from_warranty_status() -> None:
+    """Archivierte Produkte (verkauft/entsorgt) zählen nicht mehr zur Garantie-Ampel."""
+    from datetime import date, timedelta
+
+    payload = {
+        "name": "Archiv-Testgerät",
+        "kategorie": "Elektronik",
+        "warranty_end": (date.today() + timedelta(days=200)).isoformat(),
+    }
+    r = client.post("/api/products", json=payload)
+    product_id = r.json()["id"]
+
+    before = client.get("/api/products/summary/warranty-status").json()["green"]
+    r = client.put(f"/api/products/{product_id}", json={**payload, "archived": True})
+    assert r.status_code == 200
+    assert r.json()["archived"] is True
+    after = client.get("/api/products/summary/warranty-status").json()["green"]
+    assert after == before - 1
+
+    client.delete(f"/api/products/{product_id}")
+
+
+def test_insurance_person_field_and_cost_breakdown() -> None:
+    """Personen-Zuordnung: Feld wird gespeichert und in der Kostenaufteilung ausgewiesen."""
+    r = client.post("/api/insurances", json={**_INSURANCE_PAYLOAD, "person": "Christian", "praemie_eur": 240})
+    ins_id = r.json()["id"]
+    assert r.json()["person"] == "Christian"
+
+    summary = client.get("/api/insurances/summary/financial").json()
+    assert "by_person" in summary
+    assert summary["by_person"].get("Christian", 0) >= 240
+
+    client.delete(f"/api/insurances/{ins_id}")
+
+
+def test_backup_zip_contains_database() -> None:
+    """Das Komplett-Backup ist ein gültiges ZIP mit konsistenter DB-Kopie."""
+    import io
+    import zipfile
+
+    r = client.get("/api/exports/backup.zip")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        names = zf.namelist()
+        assert "db/insurance.sqlite" in names
+        # Die DB-Kopie ist eine echte SQLite-Datei
+        assert zf.read("db/insurance.sqlite")[:16] == b"SQLite format 3\x00"
+        # Temporäre _incoming-Uploads gehören nicht ins Backup
+        assert not any("_incoming" in n for n in names)
+
+
 def test_delete_insurance_unlinks_products() -> None:
     r = client.post("/api/insurances", json=_INSURANCE_PAYLOAD)
     assert r.status_code == 201

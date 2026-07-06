@@ -23,6 +23,8 @@ def _validate_recurring_date(tag: int | None, monat: int | None, feldname: str) 
 class InsuranceBase(BaseModel):
     name: str = Field(..., max_length=200)
     kategorie: Kategorie
+    # "gehört zu": freies Personen-Label für Familien (z.B. "Christian") — kein Login
+    person: str | None = Field(None, max_length=100)
     versicherer: str = Field(..., max_length=100)
     vertragsnummer: str = Field(..., max_length=50)
     start_date: date | None = None
@@ -70,9 +72,11 @@ class InsuranceRead(InsuranceBase):
 class ProductBase(BaseModel):
     name: str = Field(..., max_length=200)
     kategorie: str = Field(..., max_length=50)
+    seriennummer: str | None = Field(None, max_length=100)
     purchase_date: date | None = None
     warranty_end: date | None = None
     linked_insurance_id: int | None = None
+    archived: bool = False
     notes: str | None = Field(None, max_length=2000)
 
 
@@ -159,6 +163,7 @@ class InvoiceAnalysisPreview(BaseModel):
     purchase_date: date | None = None
     amount_eur: float | None = None
     produkt_name: str | None = None
+    garantie_monate: int | None = None
     notes: str | None = None
 
 
@@ -167,6 +172,13 @@ class DocumentClassification(BaseModel):
 
     typ: str  # "versicherung" | "rechnung" | "unbekannt"
     begruendung: str | None = None
+
+
+class DocumentAssignPayload(BaseModel):
+    """Payload für POST /documents/assign/{document_id} (Duplikat-Erkennung):
+    ordnet ein analysiertes, noch unbestätigtes Dokument einem bestehenden Vertrag zu."""
+
+    insurance_id: int
 
 
 class InvoiceRead(InvoiceCreate):
@@ -180,6 +192,17 @@ class InvoiceRead(InvoiceCreate):
     uploaded_at: datetime
 
 
+class PremiumHistoryRead(BaseModel):
+    """Ein Eintrag im Prämienverlauf einer Versicherung."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    insurance_id: int
+    praemie_eur: float | None
+    zahlungsintervall: Zahlungsintervall
+    changed_at: datetime
+
+
 class NotificationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -191,3 +214,4 @@ class NotificationRead(BaseModel):
     message: str
     status: NotificationStatus
     sent_at: datetime | None
+    error: str | None = None

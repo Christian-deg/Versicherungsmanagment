@@ -12,6 +12,7 @@ Basisbereiche:
 - `/api/invoices`
 - `/api/documents`
 - `/api/chat`
+- `/api/notifications`
 - `/api/exports`
 
 ## Allgemeine Hinweise
@@ -78,13 +79,34 @@ Fehler:
 
 ### `PUT /api/insurances/{insurance_id}`
 
-Aktualisiert eine Versicherung vollständig.
+Aktualisiert eine Versicherung vollständig. Haben sich Felder geändert, werden
+die RAG-Metadaten aller zugehörigen Dokumente **im Hintergrund neu eingebettet**
+(der bereits extrahierte Dokumentvolltext bleibt erhalten, kein erneutes OCR) —
+der Chat antwortet damit nicht mit veralteten Prämien/Laufzeiten.
+Ändern sich Prämie oder Zahlungsintervall, wird zusätzlich ein Eintrag im
+**Prämienverlauf** angelegt (alte Werte bleiben nachvollziehbar).
 
 Request-Body:
 - gleiches Schema wie beim Anlegen
 
 Fehler:
 - `404`, wenn die Versicherung nicht existiert
+
+### `GET /api/insurances/history/premiums`
+
+Prämienverlauf **aller** Versicherungen (chronologisch je Vertrag) — Grundlage
+für Trend-Anzeigen wie „+18 % seit 2024". Beim Anlegen wird der Startwert
+erfasst; bestehende Verträge erhalten beim ersten Start nach dem Update einen
+Basiseintrag (Backfill-Migration).
+
+Response-Beispiel:
+
+```json
+[
+  { "insurance_id": 3, "praemie_eur": 500.0, "zahlungsintervall": "jährlich", "changed_at": "2025-06-11T14:13:08" },
+  { "insurance_id": 3, "praemie_eur": 590.0, "zahlungsintervall": "jährlich", "changed_at": "2026-07-02T18:00:00" }
+]
+```
 
 ### `DELETE /api/insurances/{insurance_id}`
 
@@ -100,7 +122,10 @@ Fehler:
 
 ### `GET /api/insurances/summary/financial`
 
-Liefert eine Finanzzusammenfassung über alle Versicherungen.
+Liefert eine Finanzzusammenfassung über alle Versicherungen. Neben
+`by_category` enthält die Antwort `by_person` (Jahresprämien je
+Personen-Label aus dem Feld `person`; Verträge ohne Zuordnung laufen unter
+„Ohne Zuordnung").
 
 Response-Beispiel:
 
@@ -138,12 +163,19 @@ Request-Body:
 {
   "name": "Waschmaschine",
   "kategorie": "Haushalt",
+  "seriennummer": "WM-123456",
   "purchase_date": "2025-03-01",
   "warranty_end": "2027-03-01",
   "linked_insurance_id": 1,
+  "archived": false,
   "notes": "optional"
 }
 ```
+
+- `seriennummer` (optional): wird im Garantiefall oft abgefragt
+- `archived` (Standard `false`): archivierte Produkte (verkauft/entsorgt) sind aus
+  aktiven Listen, Garantie-Ampel, Warnungen und ICS-Feed ausgenommen — ihre
+  Belege bleiben aber bis zum Ende der Aufbewahrungsfrist erhalten
 
 Response:
 - `201 Created`
@@ -175,7 +207,7 @@ Fehler:
 
 ### `GET /api/products/summary/warranty-status`
 
-Liefert die Garantie-Ampel.
+Liefert die Garantie-Ampel. Archivierte Produkte werden nicht mitgezählt.
 
 Response-Beispiel:
 
@@ -199,11 +231,13 @@ wird das Kaufdatum des Produkts verwendet, ersatzweise das heutige Datum.
 ### `POST /api/invoices/analyze`
 
 Analysiert eine Rechnungsdatei per KI (ohne sie zu speichern) und gibt einen
-Vorschlag für Kaufdatum, Betrag, Produktname und Notiz zurück. Bei PDFs mit
-Textlayer wird der Text direkt analysiert, sonst per Vision-Modell. Schlägt die
-Analyse fehl, kommen leere Felder zurück — der Upload erfolgt erst nach
-Bestätigung über `POST /api/invoices`. Der `produkt_name` dient als Vorschlag
-für die Direkt-Anlage eines neuen Produkts im Frontend.
+Vorschlag für Kaufdatum, Betrag, Produktname, **Garantiedauer** und Notiz
+zurück. Bei PDFs mit Textlayer wird der Text direkt analysiert, sonst per
+Vision-Modell. Schlägt die Analyse fehl, kommen leere Felder zurück — der
+Upload erfolgt erst nach Bestätigung über `POST /api/invoices`. Der
+`produkt_name` dient als Vorschlag für die Direkt-Anlage eines neuen Produkts
+im Frontend; `garantie_monate` (nur wenn explizit auf dem Beleg genannt, z. B.
+„3 Jahre Herstellergarantie" → 36) befüllt dessen Garantieende vor.
 
 Request:
 - `multipart/form-data`
@@ -271,6 +305,16 @@ Liefert eine einzelne Rechnung.
 
 Fehler:
 - `404`, wenn die Rechnung nicht existiert
+
+### `GET /api/invoices/{invoice_id}/file`
+
+Liefert die Rechnungsdatei zur **Ansicht im Browser** (Content-Disposition
+`inline`) — analog zu `GET /api/documents/{id}/file`. Gespeicherte Pfade aus
+anderer Umgebung (Docker ↔ lokal) werden sicher aufgelöst.
+
+Fehler:
+- `404`, wenn die Rechnung nicht existiert
+- `410`, wenn die Datei nicht mehr vorhanden ist
 
 ### `GET /api/invoices/{invoice_id}/download`
 
@@ -429,6 +473,54 @@ Fehler:
 - `404`, wenn die Versicherung nicht existiert
 - `400` bei Dateiproblemen
 
+### `POST /api/documents/assign/{document_id}`
+
+Ordnet ein analysiertes, noch **unbestätigtes** Dokument einem bestehenden Vertrag
+zu (Duplikat-Erkennung: das Frontend erkennt anhand der Vertragsnummer, dass der
+Vertrag schon existiert — z. B. bei der jährlich neuen Police). Die Datei wird in
+den finalen Ordner verschoben und im Hintergrund volltextindiziert.
+
+Request-Body:
+
+```json
+{ "insurance_id": 3 }
+```
+
+Response:
+- `DocumentRead`
+
+Fehler:
+- `404`, wenn Dokument oder Versicherung nicht existieren
+- `400`, wenn das Dokument bereits zugeordnet ist
+- `410`, wenn die Quelldatei nicht mehr vorhanden ist
+
+### `GET /api/documents/{document_id}/file`
+
+Liefert die gespeicherte Dokumentdatei zur **Ansicht im Browser** (Content-Disposition
+`inline`). Der MIME-Typ ist durch die Upload-Validierung strikt auf PDF/PNG/JPEG
+begrenzt. Gespeicherte Pfade aus einer anderen Umgebung (Docker ↔ lokal) werden
+sicher gegen das aktuelle Datenverzeichnis aufgelöst.
+
+Response:
+- Datei-Stream mit dem Original-MIME-Typ
+
+Fehler:
+- `404`, wenn das Dokument nicht existiert
+- `410`, wenn die Datei nicht mehr vorhanden ist (oder außerhalb des Datenverzeichnisses läge)
+
+### `POST /api/documents/maintenance/reindex`
+
+Konsistenz-Check des Suchindex (Embedding-Wartung): vergleicht alle einer
+Versicherung zugeordneten Dokumente mit dem Vektorindex und stößt für fehlende
+Einträge das Embedding (Volltext inkl. Vision-OCR-Fallback) **im Hintergrund**
+neu an. Die Response kommt sofort; die Indizierung selbst kann einige Minuten dauern.
+
+Response-Beispiel:
+
+```json
+{ "dokumente": 9, "fehlend": 1 }
+```
+
 ### `DELETE /api/documents/{document_id}`
 
 Löscht ein einzelnes Dokument samt Datei und Vektorindex-Einträgen.
@@ -493,8 +585,8 @@ Request-Body:
 
 - `verlauf` ist optional (Standard: leer = Frage ohne Kontext)
 - max. 30 Nachrichten, Rollen nur `user`/`assistant`, je max. 4000 Zeichen
-- Der Verlauf wird nur pro Browser-Sitzung gehalten — beim erneuten Öffnen der
-  Assistenten-Seite beginnt ein neuer Chat
+- Das Frontend hält den Verlauf pro Browser-Tab (sessionStorage) — er übersteht
+  Seitenwechsel innerhalb der App; „Neuer Chat" setzt ihn zurück
 - Der Prompt-Injection-Guardrail prüft Frage und Verlauf
 
 Der Agent beantwortet Fragen zu:
@@ -518,6 +610,35 @@ Fehler:
 - `400`, wenn der Sicherheitsfilter die Anfrage ablehnt (z. B. Prompt-Injection-Muster)
 - `502`, wenn der Chat-Agent fehlschlägt oder die Antwort blockiert wird (generische Meldung, Details im Server-Log)
 
+## Erinnerungen
+
+### `GET /api/notifications`
+
+Verlauf der Frist-Warnungen (neueste zuerst) — macht das Warnsystem in der UI
+nachvollziehbar.
+
+Query-Parameter:
+- `limit` – max. Anzahl Einträge (Standard 100, Maximum 500)
+
+Response:
+- Array aus `NotificationRead` (`ref_type`: `insurance` | `product` |
+  `insurance_cancellation`; `status`: `pending` | `sent` | `failed`; bei
+  `failed` zusätzlich `error`)
+
+### `POST /api/notifications/test`
+
+Sendet eine Test-Benachrichtigung über Pushover, um die Konfiguration zu prüfen.
+
+Response:
+
+```json
+{ "status": "ok" }
+```
+
+Fehler:
+- `400`, wenn Pushover nicht konfiguriert ist (`PUSHOVER_USER_KEY`/`PUSHOVER_APP_TOKEN`)
+- `502`, wenn der Pushover-Versand fehlschlägt (inkl. Fehlerdetails)
+
 ## Exporte
 
 ### `GET /api/exports/insurances.xlsx`
@@ -540,6 +661,33 @@ Exportiert alle Produkte als Excel-Datei.
 
 Response:
 - MIME: `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+
+### `GET /api/exports/backup.zip`
+
+Komplett-Backup als ZIP-Download: konsistente Kopien der SQLite-Datenbank und
+des Vektorindex (via SQLite-Backup-API, auch bei laufenden Schreibzugriffen)
+plus alle Dokumente und Belege. Temporäre `_incoming`-Uploads sind ausgenommen.
+Dateiname enthält das Datum (`versicherung-backup-YYYY-MM-DD.zip`).
+
+Response:
+- MIME: `application/zip`
+
+### `GET /api/exports/calendar.ics`
+
+iCalendar-Feed (RFC 5545) zum **Abonnieren** in Kalender-Apps (Apple/Google
+Kalender, Thunderbird …). Enthält als ganztägige Termine:
+
+- Vertragsabläufe (`end_date`) je Versicherung
+- Garantieenden (`warranty_end`) je Produkt
+- Kündigungsfristen („kündbar bis") als **jährlich wiederkehrende Serie**
+  (`RRULE:FREQ=YEARLY`)
+
+Nutzereingaben (Namen) werden gemäß RFC 5545 escaped, Zeilen gefaltet. Die
+UIDs sind stabil (`insurance-{id}-ablauf@…`), sodass Kalender-Apps Termine bei
+Änderungen aktualisieren statt duplizieren.
+
+Response:
+- MIME: `text/calendar; charset=utf-8`
 
 ## Datenmodelle
 

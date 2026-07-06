@@ -12,9 +12,12 @@ import '@mdi/font/css/materialdesignicons.css'
 import App from './App.vue'
 import Dashboard from './views/Dashboard.vue'
 import Insurances from './views/Insurances.vue'
+import InsuranceDetail from './views/InsuranceDetail.vue'
 import Invoices from './views/Invoices.vue'
 import Products from './views/Products.vue'
+import ProductDetail from './views/ProductDetail.vue'
 import Calendar from './views/Calendar.vue'
+import Notifications from './views/Notifications.vue'
 import Upload from './views/Upload.vue'
 import Chat from './views/Chat.vue'
 
@@ -23,9 +26,12 @@ const router = createRouter({
   routes: [
     { path: '/', component: Dashboard, name: 'dashboard' },
     { path: '/insurances', component: Insurances, name: 'insurances' },
+    { path: '/insurances/:id', component: InsuranceDetail, name: 'insurance-detail' },
     { path: '/products', component: Products, name: 'products' },
+    { path: '/products/:id', component: ProductDetail, name: 'product-detail' },
     { path: '/invoices', component: Invoices, name: 'invoices' },
     { path: '/calendar', component: Calendar, name: 'calendar' },
+    { path: '/notifications', component: Notifications, name: 'notifications' },
     { path: '/upload', component: Upload, name: 'upload' },
     { path: '/chat', component: Chat, name: 'chat' },
   ],
@@ -45,6 +51,15 @@ const vuetify = createVuetify({
           error: '#d32f2f',
           warning: '#f9a825',
           success: '#43a047',
+        },
+      },
+      dark: {
+        colors: {
+          primary: '#64b5f6',
+          secondary: '#4db6ac',
+          error: '#ef5350',
+          warning: '#fdd835',
+          success: '#66bb6a',
         },
       },
     },

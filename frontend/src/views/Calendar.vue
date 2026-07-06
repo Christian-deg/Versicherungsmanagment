@@ -29,6 +29,37 @@
       </v-card-text>
     </v-card>
 
+    <!-- ICS-Feed: Fristen im eigenen Kalender (Handy/Familie) abonnieren -->
+    <v-card class="mt-4">
+      <v-card-title>
+        <v-icon icon="mdi-calendar-sync" class="mr-2" />Im eigenen Kalender abonnieren
+      </v-card-title>
+      <v-card-text>
+        <p class="text-body-2 text-medium-emphasis mb-3">
+          Abonniere diese Adresse in deiner Kalender-App (Apple/Google Kalender, Thunderbird …) —
+          alle Vertragsabläufe, Garantieenden und jährlichen Kündigungsfristen erscheinen dann
+          automatisch bei allen im Haushalt und bleiben aktuell.
+        </p>
+        <div class="d-flex flex-column flex-sm-row ga-2 align-sm-center">
+          <v-text-field
+            :model-value="icsUrl"
+            label="Kalender-Adresse (ICS)"
+            readonly
+            density="comfortable"
+            hide-details
+            @focus="$event.target.select()"
+          />
+          <v-btn variant="outlined" prepend-icon="mdi-content-copy" @click="copyIcsUrl">Kopieren</v-btn>
+          <v-btn variant="outlined" prepend-icon="mdi-download" :href="icsUrl" download>Herunterladen</v-btn>
+        </div>
+        <p class="text-caption text-medium-emphasis mt-2 mb-0">
+          Apple Kalender: Ablage → Neues Kalenderabonnement · Google Kalender: Weitere Kalender →
+          Per URL · Die Adresse funktioniert nur im Heimnetz.
+        </p>
+      </v-card-text>
+    </v-card>
+
+    <v-snackbar v-model="copied.show" :color="copied.color">{{ copied.text }}</v-snackbar>
     <v-snackbar v-model="error.show" color="error">{{ error.text }}</v-snackbar>
   </div>
 </template>
@@ -41,6 +72,29 @@ import { formatDate, parseDateValue } from '../utils'
 const insurances = ref([])
 const products = ref([])
 const error = ref({ show: false, text: '' })
+const copied = ref({ show: false, color: 'success', text: '' })
+
+// Volle URL, damit sie direkt in Kalender-Apps auf anderen Geräten funktioniert
+const icsUrl = `${window.location.origin}/api/exports/calendar.ics`
+
+async function copyIcsUrl() {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(icsUrl)
+    } else {
+      // Fallback für http im LAN (Clipboard-API braucht einen Secure Context)
+      const ta = document.createElement('textarea')
+      ta.value = icsUrl
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+    }
+    copied.value = { show: true, color: 'success', text: 'Kalender-Adresse kopiert' }
+  } catch {
+    copied.value = { show: true, color: 'warning', text: 'Bitte Adresse manuell markieren und kopieren' }
+  }
+}
 
 const series = computed(() => {
   const insData = insurances.value
@@ -79,8 +133,10 @@ function escapeHtml(value) {
 
 onMounted(async () => {
   try {
-    insurances.value = await insurancesApi.list()
-    products.value = await productsApi.list()
+    ;[insurances.value, products.value] = await Promise.all([
+      insurancesApi.list(),
+      productsApi.list(),
+    ])
   } catch (e) {
     error.value = { show: true, text: 'Kalender konnte nicht geladen werden: ' + (e.response?.data?.detail || e.message) }
   }

@@ -14,7 +14,19 @@ Nutzerführung aktuell umgesetzt wurde.
 - Build-Tool: Vite
 - Diagramme: ApexCharts
 - Routing: Vue Router mit History-Modus
-- API-Kommunikation: Axios über `/api`
+- API-Kommunikation: Axios über `/api` (Standard-Timeout 60 s; KI-Analysen und
+  Uploads 300 s, Chat 120 s)
+- PWA: Web-App-Manifest + Icons — die App lässt sich auf dem Handy zum
+  Startbildschirm hinzufügen und startet dann im Vollbild (kein Service Worker,
+  kein Offline-Modus)
+
+## Design / Dark Mode
+
+- Umschalter (Mond/Sonne) oben rechts in der App-Bar
+- Beim ersten Besuch folgt das Design der System-Einstellung
+  (`prefers-color-scheme`), danach wird die Wahl in `localStorage` gespeichert
+- Farbpaletten für hell und dunkel sind in `main.js` definiert; Komponenten
+  verwenden theme-taugliche Farben (`tonal`-Varianten statt fester Hellgrau-Töne)
 
 ## Navigationsstruktur
 
@@ -23,6 +35,11 @@ Die Anwendung verwendet eine feste Hauptnavigation mit responsivem Verhalten:
 - **Desktop / Tablet groß**: permanenter linker Navigation-Drawer
 - **Mobil / kleine Displays**: Drawer wird über das Menü-Icon in der App-Bar geöffnet
 - **Schnellaktion oben rechts**: `Schnell hochladen` führt direkt zum Upload
+- **Globale Suche** (App-Bar, ab md-Breite): findet Verträge und Produkte;
+  Treffer führen direkt zur Vertrags-Detailseite bzw. zur vorgefilterten
+  Produktliste (`/products?search=…`)
+- `router-view` ist mit `:key="route.path"` versehen, damit beim Wechsel
+  zwischen Detailseiten (z. B. `/insurances/3` → `/insurances/5`) neu geladen wird
 
 ### Hauptbereiche
 
@@ -31,8 +48,9 @@ Die Anwendung verwendet eine feste Hauptnavigation mit responsivem Verhalten:
 3. **Produkte / Garantien** – Produkte und Garantien verwalten
 4. **Rechnungen & Kaufbelege** – Kaufbelege je Produkt hochladen und verwalten
 5. **Kalender** – Zeitstrahl für Laufzeiten und Garantiezeiträume
-6. **Dokument hochladen** – Datei hochladen, KI-Vorschau prüfen, Vertrag speichern
-7. **Assistent** – Chat mit Quellenangaben und Konfidenz
+6. **Erinnerungen** – Verlauf der Frist-Warnungen und Pushover-Test
+7. **Dokument hochladen** – Datei hochladen, KI-Vorschau prüfen, Vertrag speichern
+8. **Assistent** – Chat mit Quellenangaben und Konfidenz
 
 ## Wichtige Frontend-Anpassungen
 
@@ -81,11 +99,23 @@ Inhalte:
   - aktive Garantien
 - Donut-Chart für Kosten nach Kategorie
 - Garantie-Statusliste
+- Karte „Erfasster Warenwert": Summe der Belegbeträge aktiver Produkte —
+  als Abgleich mit der Deckungssumme der Hausratversicherung
+- Kostenentwicklungs-Chart (Stufenlinie der Gesamt-Jahresprämie aus dem
+  Prämienverlauf; erscheint ab zwei Datenpunkten)
+- Kosten-Kachel zeigt zusätzlich die Aufteilung nach Person, sobald Verträge
+  ein „gehört zu"-Label haben
+- Backup-Button im Kopfbereich (`/api/exports/backup.zip`)
 - Liste der nächsten Abläufe
+- Liste der nächsten Kündigungsfristen („kündbar bis", mit Datum des dann
+  wirksamen Vertragsendes)
 
 Besonderheiten:
 - Wenn keine Daten vorhanden sind, wird ein motivierender Einstiegstext angezeigt.
 - Bei kommenden Fristen wird visuell zwischen unkritisch, bald fällig und kritisch unterschieden.
+- Datenqualitäts-Hinweis: Haben Verträge oder Produkte Lücken (fehlende Frist,
+  Prämie, Dokument bzw. Kaufbeleg, Garantieende, Kaufdatum), erscheint ein
+  Warnhinweis mit Link zur jeweiligen Liste.
 
 ### 2. Versicherungen
 
@@ -109,8 +139,49 @@ Pflichtfelder im Dialog:
 - Vertragsnummer
 
 Besonderheiten:
+- Der Vertragsname ist verlinkt und führt zur **Vertrags-Detailseite**
+  (`/insurances/{id}`).
+- Kategorie-Chips zeigen ein passendes Icon je Kategorie (Auto, Haus, Zahn …).
+- Die Prämien-Spalte (und die mobile Karte) zeigt zusätzlich die Jahresprämie und
+  den prozentualen Anteil an den Gesamtkosten, z. B. „311,00 € p.a. · 28 % der
+  Gesamtkosten"; bei Prämienänderungen erscheint ein Trend-Chip
+  („+18 % seit 2024", rot bei Erhöhung, grün bei Senkung).
+- Der Statusfilter wird in `localStorage` gemerkt (ebenso bei Produkten und
+  Rechnungen), genauso der Personen-Filter.
+- Personen-Zuordnung: Verträge können ein „gehört zu"-Label tragen (Combobox
+  mit Vorschlägen aus Bestandsdaten); vorhandene Labels erscheinen als
+  Filter-Chips und als Chip am Vertrag.
+- Löschen mit Undo: Der Eintrag verschwindet sofort, der eigentliche
+  API-Aufruf läuft erst nach 5 Sekunden — die Snackbar bietet solange
+  „Rückgängig" an (ebenso bei Produkten). Beim Verlassen der Seite wird eine
+  ausstehende Löschung sofort ausgeführt.
+- Das Bearbeiten-Formular ist als wiederverwendbare Komponente umgesetzt
+  (`components/InsuranceFormDialog.vue`) und wird von Liste und Detailseite
+  gemeinsam genutzt.
 - Nach einem erfolgreichen Dokument-Upload wird ein gespeicherter Vertrag mit Erfolgsmeldung angezeigt.
 - Für jeden Vertrag kann eine Empfehlung über den Backend-Service angefordert werden.
+- Über das Büroklammer-Symbol öffnet sich der Dokumente-Dialog: vorhandene
+  Unterlagen **im Browser ansehen** (öffnet in neuem Tab), neue Dokumente
+  anhängen (werden volltextindiziert) und einzelne Dokumente löschen.
+- Datenqualitäts-Check: Verträge mit Lücken (keine Frist, keine Prämie, kein
+  Dokument) zeigen ein Warnsymbol neben dem Namen (Tooltip mit Details);
+  in der mobilen Kartenansicht stehen die Hinweise als Textzeilen.
+
+### 2b. Vertrags-Detailseite (`/insurances/{id}`)
+
+Zweck:
+- alles zu einem Vertrag auf einer Seite statt in verteilten Dialogen
+
+Inhalte:
+- Kopfbereich mit Zurück-Navigation, „Frage zum Vertrag" (öffnet den
+  Assistenten mit vorbefülltem Bezug), Bearbeiten (gemeinsamer
+  Formular-Dialog) und Löschen (mit Bestätigung)
+- Datenqualitäts-Hinweise als Alert (falls Lücken vorhanden)
+- **Stammdaten**: Kategorie (mit Icon), Prämie inkl. Jahreswert, Laufzeit,
+  Restlaufzeit, nächste Kündigungsfrist, Notizen
+- **Prämienverlauf**: Zeitleiste aller erfassten Prämienstände mit Trend-Chip
+- **Dokumente**: ansehen (Browser-Tab), neue anhängen, löschen
+- **KI-Empfehlung**: gespeicherte Einschätzung anzeigen und neu bewerten
 
 ### 3. Produkte & Garantien
 
@@ -119,11 +190,15 @@ Zweck:
 
 Inhalte:
 - Suche nach Produkt, Kategorie oder verknüpfter Versicherung
-- Statusfilter für bald endende und abgelaufene Garantien
-- Datentabelle mit Bearbeiten- und Löschen-Aktion
-- Dialog zur Pflege von:
+- Statusfilter für bald endende und abgelaufene Garantien sowie ein
+  **Archiv**-Filter (erscheint, sobald archivierte Produkte existieren)
+- Datentabelle mit Bearbeiten- und Löschen-Aktion; Produktnamen verlinken auf
+  die Produkt-Detailseite; Kategorie-Chips mit Stichwort-basiertem Icon
+- Formular-Dialog (gemeinsame Komponente `components/ProductFormDialog.vue`,
+  auch von der Detailseite genutzt) zur Pflege von:
   - Produktname
   - freier Kategorie
+  - Seriennummer (optional, für Garantiefälle)
   - Kaufdatum
   - Garantieende
   - optional verknüpfter Versicherung
@@ -132,6 +207,25 @@ Inhalte:
 Besonderheiten:
 - Produkte können optional mit einer Versicherung verknüpft werden.
 - Ein Garantieende verbessert Fristenübersicht und spätere Benachrichtigungen.
+- Datenqualitäts-Check: fehlender Kaufbeleg, fehlendes Garantieende oder
+  fehlendes Kaufdatum werden als Warnsymbol (Tabelle) bzw. Hinweiszeilen
+  (mobile Karten) angezeigt; archivierte Produkte werden nicht bemängelt.
+
+### 3b. Produkt-Detailseite (`/products/{id}`)
+
+Zweck:
+- alles zu einem Produkt auf einer Seite — inklusive der Kaufbelege
+
+Inhalte:
+- Kopfbereich mit Zurück-Navigation, „Frage zum Produkt" (Assistent mit
+  vorbefülltem Bezug), Bearbeiten, **Archivieren/Reaktivieren** und Löschen
+  (der Lösch-Dialog bietet „Lieber archivieren" als sanfte Alternative)
+- Stammdaten & Garantie: Kategorie (Icon), Seriennummer, Kaufdatum,
+  Garantieende und **Restgarantie als Fortschrittsbalken**
+- Verknüpfte Versicherung als Link zur Vertrags-Detailseite
+- Kaufbelege: ansehen (Browser-Tab), herunterladen, löschen (mit
+  Fristprüfung + Bestätigungs-Checkbox), direkter Upload sowie Link in den
+  KI-Analyse-Ablauf der Rechnungs-Seite
 
 ### 5. Rechnungen & Kaufbelege
 
@@ -139,9 +233,12 @@ Zweck:
 - Kaufbelege zu Produkten hochladen und Aufbewahrungsfristen verwalten
 
 Inhalte:
-- Upload-Dialog mit Produktauswahl, Datei, Kaufdatum, Betrag und Notizen
+- Upload-Dialog mit Produktauswahl, Datei, Kaufdatum, Betrag und Notizen;
+  erkennt der Beleg eine Garantiedauer (`garantie_monate`), wird das
+  Garantieende eines neu angelegten Produkts automatisch vorbefüllt
 - Filterchips: alle / demnächst fällig / abgelaufen
-- Listendarstellung mit Aufbewahrungsfrist und Löschen-Aktion
+- Listendarstellung mit Aufbewahrungsfrist, Ansehen- (Browser-Tab),
+  Download- und Löschen-Aktion
 
 Besonderheiten:
 - Aufbewahrungsfrist wird automatisch berechnet: `max(Kaufdatum + 730 Tage, Garantieende)`
@@ -156,13 +253,30 @@ Zweck:
 Inhalte:
 - ApexCharts-Range-Bar-Diagramm
 - Versicherungen und Produkte in einer gemeinsamen Zeitachse
+- Karte „Im eigenen Kalender abonnieren": zeigt die ICS-Feed-Adresse
+  (`/api/exports/calendar.ics`) mit Kopier- und Download-Button — zum
+  Abonnieren in Apple/Google Kalender oder Thunderbird
 
 Besonderheiten:
 - Es werden nur Einträge mit vollständigen Datumswerten angezeigt.
 - Der Tooltip bereitet Namen und Datumswerte sicher auf.
 - Ohne verwertbare Daten wird ein leerer Zustand mit Erklärung angezeigt.
+- Der Kopier-Button hat einen Fallback für HTTP im LAN (die Clipboard-API
+  steht nur in Secure Contexts zur Verfügung).
 
-### 6. Dokument hochladen
+### 6. Erinnerungen
+
+Zweck:
+- nachvollziehen, welche Frist-Warnungen erzeugt und gesendet wurden
+
+Inhalte:
+- Liste aller Notifications (neueste zuerst) mit Status-Chip
+  (gesendet / ausstehend / fehlgeschlagen), Fälligkeitsdatum, Warnstufe und
+  bei Fehlern der Fehlermeldung
+- Symbol je Typ: Vertrag (Schild), Garantie (Paket), Kündigungsfrist (Kalender)
+- Button **Test-Push senden** zum Prüfen der Pushover-Konfiguration
+
+### 7. Dokument hochladen
 
 Zweck:
 - bestehende Police als PDF oder Bild einlesen und per KI vorbefüllen
@@ -173,10 +287,13 @@ Unterstützte Dateitypen:
 - JPEG
 
 Maximale Dateigröße:
-- 10 MB
+- 80 MB für Versicherungsdokumente
+- 10 MB für Rechnungen (nach Weiterleitung in den Rechnungs-Ablauf)
 
 Ablauf:
-1. Datei auswählen
+1. Datei auswählen — auf Mobilgeräten alternativ **„Mit Kamera aufnehmen"**
+   (verstecktes Input mit `capture="environment"`, öffnet direkt die Rückkamera;
+   gleiches Muster im Rechnungs-Upload)
 2. `Hochladen & analysieren` starten
 3. KI-Vorschlag in der Extraktionsvorschau prüfen
 4. erkannte Felder bei Bedarf korrigieren
@@ -202,8 +319,16 @@ Besonderheiten:
 - Die Konfidenz wird farblich hervorgehoben.
 - Hinweise aus der Extraktion werden in einem Info-Hinweis angezeigt.
 - Nutzer können den Vorgang verwerfen und neu starten.
+- Während der Analyse wird darauf hingewiesen, dass gescannte, mehrseitige
+  Dokumente einige Minuten dauern können.
+- **Duplikat-Erkennung**: Existiert bereits ein Vertrag mit derselben
+  Vertragsnummer (normalisiert, d. h. ohne Leer-/Trennzeichen), erscheint in der
+  Vorschau ein Warnhinweis mit zwei Optionen — „Anhängen + Laufzeit/Prämie
+  aktualisieren" (Dokument an den Bestandsvertrag, Felder aus der Vorschau
+  übernehmen) oder „Nur Dokument anhängen". Alternativ kann normal ein neuer
+  Vertrag angelegt werden.
 
-### 7. Assistent / Chat
+### 8. Assistent / Chat
 
 Zweck:
 - Fragen in natürlicher Sprache zu vorhandenen Versicherungs- und Produktdaten beantworten
@@ -214,16 +339,26 @@ Inhalte:
 - Quellen-Chips pro Antwort
 - Konfidenz-Chip pro Antwort
 - Eingabefeld mit Sende-Button
+- Kopfzeilen-Aktionen: „Suchindex prüfen" (Embedding-Wartung) und „Neuer Chat"
 
 Bedienung:
-- Senden über Button
-- Senden über `Strg + Enter` oder `⌘ + Enter`
+- Senden über Button oder `Enter` (`Shift + Enter` für neue Zeile)
+- „Neuer Chat" leert den Verlauf
 
 Besonderheiten:
+- Der Chatverlauf wird pro Browser-Tab gespeichert (sessionStorage) und
+  übersteht damit Seitenwechsel innerhalb der App.
+- Während der Agent arbeitet, zeigt ein rotierender Status an, was passiert
+  („Durchsuche deine Dokumente…"). Echtes Token-Streaming ist bewusst nicht
+  umgesetzt: Der Output-Sicherheitsfilter prüft die vollständige Antwort,
+  bevor sie den Server verlässt — Streaming würde ihn umgehen.
+- „Suchindex prüfen" ruft `POST /api/documents/maintenance/reindex` auf und
+  meldet per Snackbar, ob Dokumente nachindiziert werden.
 - Der Assistent kann Fragen zu Stammdaten (Prämien, Laufzeiten) **und** zu konkreten
   Vertragsbedingungen (Selbstbehalt, Deckungsumfang, Ausschlüsse) beantworten, sofern
   beim Upload ein Textlayer vorhanden war oder Vision-OCR erfolgreich war.
-- Bei Fehlern wird die Fehlermeldung als Assistentenantwort in den Chat aufgenommen.
+- Bei Fehlern wird die Fehlermeldung als Assistentenantwort in den Chat aufgenommen
+  (Fehler werden nicht als Kontext an das Backend zurückgesendet).
 - Der Nachrichtenbereich scrollt nach jeder Nachricht automatisch nach unten.
 
 ## API-Nutzung im Frontend
@@ -237,6 +372,7 @@ Verwendete Bereiche:
   - Aktualisieren
   - Löschen
   - Finanzzusammenfassung
+  - Prämienverlauf (`premiumHistory`)
 
 - `productsApi`
   - Listen
@@ -251,12 +387,24 @@ Verwendete Bereiche:
   - Löschen (nur nach Ablauf der Aufbewahrungsfrist)
 
 - `documentsApi`
-  - Dokument hochladen
+  - Dokumenttyp erkennen (classify)
+  - Dokument hochladen und analysieren
+  - weitere Dokumente ohne Analyse hochladen / an Verträge anhängen
+  - analysiertes Dokument bestehendem Vertrag zuordnen (`assign`, Duplikat-Erkennung)
   - bestätigte Extraktion speichern
-  - Empfehlung abrufen
+  - Dokumente auflisten, ansehen (`/documents/{id}/file`) und löschen
+  - Empfehlung abrufen und neu erzeugen
+  - Suchindex-Wartung (`reindex`)
+
+- `notificationsApi`
+  - Erinnerungs-Verlauf laden
+  - Test-Push senden
 
 - `chatApi`
-  - Frage an Chat-Endpunkt senden
+  - Frage an Chat-Endpunkt senden (inkl. bisherigem Verlauf)
+
+- Exporte (direkte Links, kein Axios): PDF/Excel-Downloads und der
+  ICS-Kalender-Feed `/api/exports/calendar.ics`
 
 ## Responsive Verhalten
 

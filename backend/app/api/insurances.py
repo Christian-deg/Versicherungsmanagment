@@ -4,14 +4,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.database import get_db
 from app.models.enums import INTERVALS_PER_YEAR
-from app.models.models import Insurance, Product
-from app.schemas.schemas import InsuranceCreate, InsuranceRead
+from app.models.models import Insurance, PremiumHistory, Product
+from app.schemas.schemas import InsuranceCreate, InsuranceRead, PremiumHistoryRead
 from app.services import embedding_service
 
 log = logging.getLogger(__name__)
@@ -23,13 +23,32 @@ def list_all(db: Session = Depends(get_db)) -> list[Insurance]:
     return db.query(Insurance).order_by(Insurance.end_date.is_(None), Insurance.end_date).all()
 
 
+def record_premium(db: Session, ins: Insurance) -> None:
+    """Hängt den aktuellen Prämienstand an den Verlauf an (ohne Commit)."""
+    db.add(
+        PremiumHistory(
+            insurance_id=ins.id,
+            praemie_eur=ins.praemie_eur,
+            zahlungsintervall=ins.zahlungsintervall,
+        )
+    )
+
+
 @router.post("", response_model=InsuranceRead, status_code=status.HTTP_201_CREATED)
 def create(payload: InsuranceCreate, db: Session = Depends(get_db)) -> Insurance:
     obj = Insurance(**payload.model_dump())
     db.add(obj)
+    db.flush()
+    record_premium(db, obj)  # Startwert für den Prämienverlauf
     db.commit()
     db.refresh(obj)
     return obj
+
+
+@router.get("/history/premiums", response_model=list[PremiumHistoryRead])
+def premium_history(db: Session = Depends(get_db)) -> list[PremiumHistory]:
+    """Prämienverlauf aller Versicherungen (älteste zuerst) — für Trend-Anzeigen im Frontend."""
+    return db.query(PremiumHistory).order_by(PremiumHistory.insurance_id, PremiumHistory.changed_at).all()
 
 
 @router.get("/summary/financial")
@@ -38,6 +57,7 @@ def financial_summary(db: Session = Depends(get_db)) -> dict:
     rows = db.query(Insurance).all()
     total_year = 0.0
     by_kat: dict[str, float] = {}
+    by_person: dict[str, float] = {}
     for r in rows:
         if r.praemie_eur is None:
             continue
@@ -45,10 +65,13 @@ def financial_summary(db: Session = Depends(get_db)) -> dict:
         per_year = r.praemie_eur * INTERVALS_PER_YEAR.get(r.zahlungsintervall, 1)
         total_year += per_year
         by_kat[r.kategorie.value] = by_kat.get(r.kategorie.value, 0.0) + per_year
+        person = (r.person or "").strip() or "Ohne Zuordnung"
+        by_person[person] = by_person.get(person, 0.0) + per_year
     return {
         "total_year_eur": round(total_year, 2),
         "total_month_eur": round(total_year / 12, 2),
         "by_category": {k: round(v, 2) for k, v in sorted(by_kat.items())},
+        "by_person": {k: round(v, 2) for k, v in sorted(by_person.items())},
     }
 
 
@@ -61,14 +84,36 @@ def get_one(insurance_id: int, db: Session = Depends(get_db)) -> Insurance:
 
 
 @router.put("/{insurance_id}", response_model=InsuranceRead)
-def update(insurance_id: int, payload: InsuranceCreate, db: Session = Depends(get_db)) -> Insurance:
+def update(
+    insurance_id: int,
+    payload: InsuranceCreate,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> Insurance:
     obj = db.get(Insurance, insurance_id)
     if not obj:
         raise HTTPException(status_code=404, detail="Versicherung nicht gefunden")
+    old_praemie, old_intervall = obj.praemie_eur, obj.zahlungsintervall
+    changed = False
     for k, v in payload.model_dump().items():
+        if getattr(obj, k) != v:
+            changed = True
         setattr(obj, k, v)
+    # Prämienverlauf fortschreiben, wenn sich Prämie oder Intervall geändert haben
+    if obj.praemie_eur != old_praemie or obj.zahlungsintervall != old_intervall:
+        record_premium(db, obj)
     db.commit()
     db.refresh(obj)
+
+    # RAG-Metadaten der zugehörigen Dokumente auffrischen, sonst antwortet der
+    # Chat weiter mit den alten Prämien/Laufzeiten aus dem Vektorindex.
+    # Texte hier (bei offener Session) bauen — der Task läuft nach der Response.
+    if changed and obj.documents:
+        doc_texts = [
+            (d.id, embedding_service.build_insurance_metadata(obj, d.ai_summary))
+            for d in obj.documents
+        ]
+        background.add_task(embedding_service.refresh_insurance_metadata, obj.id, doc_texts)
     return obj
 
 
@@ -97,5 +142,7 @@ def delete(insurance_id: int, db: Session = Depends(get_db)) -> None:
     db.query(Product).filter(Product.linked_insurance_id == insurance_id).update(
         {Product.linked_insurance_id: None}
     )
+    # Prämienverlauf mit entfernen (kein ORM-Cascade definiert)
+    db.query(PremiumHistory).filter(PremiumHistory.insurance_id == insurance_id).delete()
     db.delete(obj)
     db.commit()

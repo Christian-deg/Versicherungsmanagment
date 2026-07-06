@@ -1,20 +1,30 @@
-"""Export-Endpoints: PDF und Excel."""
+"""Export-Endpoints: PDF, Excel, ICS-Kalender-Feed und Komplett-Backup."""
 from __future__ import annotations
 
+import logging
+import sqlite3
+import tempfile
+import zipfile
+from datetime import UTC, date, datetime
 from io import BytesIO
+from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from openpyxl import Workbook
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
+from app.config import settings
 from app.models.database import get_db
 from app.models.models import Insurance, Product
+from app.scheduler.notification_job import next_recurring_date
 
+log = logging.getLogger(__name__)
 router = APIRouter()
 
 # Zeichen, die Excel als Formel-Beginn interpretiert (Formula Injection)
@@ -43,6 +53,7 @@ def export_insurances_xlsx(db: Session = Depends(get_db)) -> StreamingResponse:
         [
             "Name",
             "Kategorie",
+            "Gehört zu",
             "Versicherer",
             "Vertragsnummer",
             "Start",
@@ -58,6 +69,7 @@ def export_insurances_xlsx(db: Session = Depends(get_db)) -> StreamingResponse:
             [
                 r.name,
                 r.kategorie.value,
+                r.person or "",
                 r.versicherer,
                 r.vertragsnummer,
                 r.start_date.isoformat() if r.start_date else "",
@@ -117,6 +129,170 @@ def export_insurances_pdf(db: Session = Depends(get_db)) -> StreamingResponse:
         buf,
         media_type="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="versicherungen.pdf"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Komplett-Backup (ZIP) — Datensicherung per Klick, ohne Konsole
+# ---------------------------------------------------------------------------
+
+def _add_sqlite_backup(zf: zipfile.ZipFile, db_path: Path, arcname: str) -> None:
+    """Fügt eine konsistente Kopie einer SQLite-DB hinzu (Backup-API statt Datei-Kopie)."""
+    if not db_path.exists():
+        return
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(tmp_path))
+        with dst:
+            src.backup(dst)
+        dst.close()
+        src.close()
+        zf.write(tmp_path, arcname)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _add_directory(zf: zipfile.ZipFile, base: Path, arcprefix: str) -> None:
+    """Fügt alle Dateien eines Verzeichnisses hinzu (ohne temporäre _incoming-Uploads)."""
+    if not base.is_dir():
+        return
+    for f in sorted(base.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(base)
+        if rel.parts and rel.parts[0] == "_incoming":
+            continue
+        zf.write(f, f"{arcprefix}/{rel.as_posix()}")
+
+
+@router.get("/backup.zip")
+def export_backup() -> FileResponse:
+    """Komplett-Backup als ZIP: Datenbank, Vektorindex, alle Dokumente und Belege.
+
+    PDFs/Bilder sind bereits komprimiert — ZIP_STORED hält den Export schnell.
+    Die Datenbanken werden über die SQLite-Backup-API konsistent kopiert (auch
+    bei laufenden Schreibzugriffen). Die ZIP-Datei entsteht in einer Temp-Datei
+    und wird nach dem Download automatisch gelöscht.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_STORED) as zf:
+            _add_sqlite_backup(zf, settings.db_path, "db/insurance.sqlite")
+            _add_sqlite_backup(zf, settings.vectordb_dir / "vectors.sqlite", "vectordb/vectors.sqlite")
+            _add_directory(zf, settings.documents_dir.resolve(), "documents")
+            _add_directory(zf, settings.invoices_dir.resolve(), "invoices")
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    log.info("Backup-ZIP erstellt (%.1f MB)", tmp_path.stat().st_size / (1024 * 1024))
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=f"versicherung-backup-{date.today().isoformat()}.zip",
+        background=BackgroundTask(tmp_path.unlink, missing_ok=True),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ICS-Kalender-Feed (zum Abonnieren in Apple/Google/Thunderbird-Kalendern)
+# ---------------------------------------------------------------------------
+
+def _ics_escape(text: str) -> str:
+    """Escaped Sonderzeichen gemäß RFC 5545 (Nutzereingaben in SUMMARY etc.)."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def _ics_fold(line: str) -> str:
+    """RFC-5545-Zeilenfaltung: lange Zeilen umbrechen, Fortsetzung mit Leerzeichen.
+
+    Konservativ bei 60 Zeichen gefaltet (Grenzwert der Spezifikation sind 75
+    Oktette — Umlaute belegen in UTF-8 mehrere Bytes).
+    """
+    parts: list[str] = []
+    while len(line) > 60:
+        parts.append(line[:60])
+        line = " " + line[60:]
+    parts.append(line)
+    return "\r\n".join(parts)
+
+
+def _vevent(uid: str, dtstamp: str, day: date, summary: str, yearly: bool = False) -> list[str]:
+    """Ganztägiges VEVENT; yearly=True erzeugt eine jährliche Serie (Kündigungsfristen)."""
+    lines = [
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART;VALUE=DATE:{day.strftime('%Y%m%d')}",
+        f"SUMMARY:{_ics_escape(summary)}",
+    ]
+    if yearly:
+        lines.append("RRULE:FREQ=YEARLY")
+    lines.append("END:VEVENT")
+    return lines
+
+
+@router.get("/calendar.ics")
+def export_calendar_ics(db: Session = Depends(get_db)) -> Response:
+    """iCalendar-Feed mit allen Fristen — als Abo-URL im Handy-/Familienkalender nutzbar.
+
+    Enthält: Vertragsabläufe, Garantieenden und jährlich wiederkehrende
+    Kündigungsfristen ("kündbar bis").
+    """
+    today = date.today()
+    dtstamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Versicherungs-Assistent//DE",
+        "CALSCALE:GREGORIAN",
+        "X-WR-CALNAME:Versicherungen & Garantien",
+    ]
+
+    for r in db.query(Insurance).all():
+        if r.end_date:
+            lines += _vevent(
+                f"insurance-{r.id}-ablauf@versicherungs-assistent",
+                dtstamp,
+                r.end_date,
+                f"Versicherung läuft ab: {r.name} ({r.versicherer})",
+            )
+        if r.kuendigung_bis_tag and r.kuendigung_bis_monat:
+            deadline = next_recurring_date(r.kuendigung_bis_tag, r.kuendigung_bis_monat, today)
+            lines += _vevent(
+                f"insurance-{r.id}-kuendigung@versicherungs-assistent",
+                dtstamp,
+                deadline,
+                f"Kündigungsfrist: {r.name} ({r.versicherer})",
+                yearly=True,
+            )
+
+    for p in (
+        db.query(Product)
+        .filter(Product.warranty_end.isnot(None), Product.archived.is_(False))
+        .all()
+    ):
+        lines += _vevent(
+            f"product-{p.id}-garantie@versicherungs-assistent",
+            dtstamp,
+            p.warranty_end,
+            f"Garantie endet: {p.name}",
+        )
+
+    lines.append("END:VCALENDAR")
+    body = "\r\n".join(_ics_fold(line) for line in lines) + "\r\n"
+    return Response(
+        content=body,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": 'inline; filename="versicherungen.ics"'},
     )
 
 

@@ -89,6 +89,36 @@ async def test_upsert_replaces_chunks(vector_db) -> None:
         assert hits[0]["text"] == "KFZ Police aktualisiert"
 
 
+async def test_reembed_removes_stale_chunks(vector_db) -> None:
+    """Ergibt der neue Text weniger Chunks, dürfen keine alten Chunk-Leichen übrig bleiben."""
+    with patch.object(embedding_service, "_client", return_value=_fake_openai_client()):
+        await embedding_service.embed_and_store(1, 10, "hausrat lang " * 500)  # mehrere Chunks
+        await embedding_service.embed_and_store(1, 10, "hausrat kurz")  # ein Chunk
+        hits = await embedding_service.search("hausrat", n_results=10)
+        assert len(hits) == 1
+        assert hits[0]["text"] == "hausrat kurz"
+
+
+async def test_refresh_insurance_metadata_updates_block_keeps_fulltext(vector_db) -> None:
+    """Nach Vertragsänderung: Metadaten-Block wird ersetzt, extrahierter Volltext bleibt."""
+    with patch.object(embedding_service, "_client", return_value=_fake_openai_client()):
+        old_text = (
+            "Versicherung: Alt\nPrämie: 100 EUR"
+            + embedding_service.FULLTEXT_SEPARATOR
+            + "kfz volltextinhalt " * 300  # → mehrere Chunks (testet die Rekonstruktion)
+        )
+        await embedding_service.embed_and_store(1, 10, old_text)
+
+        await embedding_service.refresh_insurance_metadata(
+            1, [(10, "Versicherung: Neu\nPrämie: 50 EUR")]
+        )
+
+        text = embedding_service.texts_for_insurance(1, max_chars=100_000)
+        assert "Versicherung: Neu" in text
+        assert "Versicherung: Alt" not in text
+        assert "kfz volltextinhalt" in text  # Volltext blieb erhalten (kein erneutes OCR nötig)
+
+
 async def test_dimension_mismatch_returns_empty(vector_db) -> None:
     """Nach Modellwechsel (andere Dimension) gibt die Suche leer zurück statt zu crashen."""
     with patch.object(embedding_service, "_client", return_value=_fake_openai_client()):

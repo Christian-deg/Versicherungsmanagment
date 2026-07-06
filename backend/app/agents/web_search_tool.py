@@ -39,6 +39,8 @@ async def run_web_search(query: str) -> str:
     if found:
         log.warning("web_search blockiert: %s in Suchanfrage erkannt", found)
         return json.dumps({"error": "Suchanfrage enthält sensible Daten und wurde blockiert."})
+    # Jede ausgehende Query loggen — macht nachvollziehbar, was den Rechner verlässt
+    log.info("web_search: %r", query)
 
     try:
         svc = get_search_service(settings.search_provider, settings.search_api_key)

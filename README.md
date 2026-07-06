@@ -28,9 +28,38 @@ via Pushover.
 - 🤖 **Chat-Assistent**: Fragen beantworten via RAG über alle gespeicherten Dokumente
 - 📅 **Kalender / Zeitstrahl**: alle Versicherungen + Garantien auf einen Blick
 - 💰 **Finanzübersicht**: Kosten pro Monat, pro Kategorie, Gesamtkosten
-- 🛡 **Produkte / Garantien**: Garantie-Ampel (grün/gelb/rot)
-- 📲 **Pushover-Benachrichtigungen**: 90/30/7 Tage vor Ablauf, hohe Priorität bei <7 Tagen
+- 🛡 **Produkte / Garantien**: Garantie-Ampel (grün/gelb/rot), Produkt-Detailseite mit
+  Belegen und Restgarantie-Balken, Seriennummern, Archivieren statt Löschen
+  (Belege bleiben erhalten), Garantiedauer wird aus dem Kaufbeleg gelesen
+- 💎 **Warenwert-Übersicht**: Summe aller Belegbeträge als Abgleich mit der
+  Hausrat-Deckungssumme
+- 📲 **Pushover-Benachrichtigungen**: 90/30/7 Tage vor Ablauf, hohe Priorität bei <7 Tagen;
+  zusätzlich 30/7 Tage vor jeder Kündigungsfrist („kündbar bis") — jährlich wiederkehrend
+- 🗓 **Kalender-Abo (ICS)**: Abläufe, Garantieenden und Kündigungsfristen als Feed für
+  Apple/Google Kalender & Co. (`/api/exports/calendar.ics`)
 - 📤 **Export**: PDF & Excel
+- 👁 **Dokument-Ansicht**: gespeicherte Policen direkt im Browser öffnen
+- 🌙 **Dark Mode**: umschaltbar, folgt standardmäßig der System-Einstellung
+- 📱 **Installierbar (PWA)**: per „Zum Startbildschirm hinzufügen" wie eine App aufs Handy
+- 🔧 **Suchindex-Wartung**: Konsistenz-Check des Vektorindex per Klick im Assistenten;
+  fehlende Dokumente werden automatisch nachindiziert
+- 🩺 **Datenqualitäts-Check**: Warnhinweise bei Verträgen ohne Frist, Prämie oder Dokument —
+  damit Erinnerungen nicht ins Leere laufen
+- 🔁 **Duplikat-Erkennung**: erkennt beim Upload bereits vorhandene Vertragsnummern und bietet
+  an, das Dokument an den Bestandsvertrag zu hängen (inkl. Übernahme von Laufzeit/Prämie)
+- 🔔 **Erinnerungs-Verlauf & Test-Push**: alle gesendeten Warnungen nachvollziehbar in der UI,
+  Pushover-Konfiguration per Knopfdruck testbar
+- 📄 **Vertrags-Detailseite**: Stammdaten, Fristen, Prämienverlauf, Dokumente und KI-Empfehlung
+  je Vertrag auf einer Seite
+- 📈 **Prämien-Historie**: Beitragsänderungen bleiben nachvollziehbar („+18 % seit 2024") und
+  fließen in die KI-Empfehlung ein
+- 🔎 **Globale Suche**: Verträge und Produkte direkt aus der Kopfleiste finden
+- 👥 **Personen-Zuordnung**: „gehört zu"-Label je Vertrag mit Filter und Kosten je Person —
+  Familien-Übersicht ohne Benutzerverwaltung
+- 📉 **Kostenentwicklung**: Gesamt-Jahresprämie im Zeitverlauf auf dem Dashboard
+- 💾 **Backup per Klick**: Komplett-Sicherung (Datenbank + Dokumente + Belege) als ZIP
+- ↩️ **Lösch-Undo**: 5 Sekunden „Rückgängig" nach dem Löschen von Verträgen und Produkten
+- 📷 **Kamera-Aufnahme**: Dokumente und Belege am Handy direkt abfotografieren
 - 🌐 **Web-Suche (optional)**: aktuelle Marktinfos für den Empfehlungs-Agenten via Serper oder Brave
   (`SEARCH_PROVIDER`/`SEARCH_API_KEY` in `.env`); Suchanfragen werden auf sensible Daten geprüft,
   Treffer mit Injection-Mustern verworfen
@@ -156,8 +185,9 @@ Alle Agenten folgen einheitlichen Sicherheitsregeln (OWASP LLM Top 10, siehe `AG
 ## Zukünftige Features
 
 - 🗄️ **ChromaDB-Migration**: Rückmigration zur ChromaDB, sobald Speicherprobleme auf diesem System behoben sind
-- 🔄 **Embedding-Datenbank-Wartung**: Manuelle Aktualisierung der Vektor-DB mit Konsistenzprüfung — prüft, ob alle Dokumente in der Embeddings-Datenbank vorhanden sind, und trägt fehlende Einträge neu ein
-- 🧮 **Prozentualer Anteil je Versicherung**: in Tabelle und mobiler Karte Jahresprämie plus Anteil an den Gesamtkosten anzeigen (z. B. „240 € / Jahr · 12 % der Gesamtkosten") — reine Frontendberechnung
+- 🌐 **Sprachumschaltung Deutsch/Englisch**: umschaltbare Oberflächensprache (i18n, z. B. via
+  vue-i18n) — UI-Texte, Datums-/Währungsformate und idealerweise auch die Antwortsprache des
+  Chat-Assistenten folgen der gewählten Sprache
 
 ## Lizenz
 

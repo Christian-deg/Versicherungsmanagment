@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 
+import anyio.to_thread
 from agents import (
     Agent,
     GuardrailFunctionOutput,
@@ -82,7 +83,8 @@ async def get_versicherung_details(insurance_id: int) -> str:
     Ausschlüsse) — nicht nur den Preis. Gibt zusammengeführten Volltext zurück
     (gekürzt), oder einen Hinweis, dass keine Dokumente hinterlegt sind.
     """
-    text = embedding_service.texts_for_insurance(insurance_id, max_chars=4000)
+    # SQLite-Zugriff blockiert — im Thread ausführen (Tool läuft auf dem Event-Loop)
+    text = await anyio.to_thread.run_sync(embedding_service.texts_for_insurance, insurance_id, 4000)
     if not text:
         return json.dumps({"hinweis": "Keine Dokumentinhalte hinterlegt — nur Stammdaten verfügbar."})
     return json.dumps({"vertragsdetails": text}, ensure_ascii=False)

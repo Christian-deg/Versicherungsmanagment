@@ -34,6 +34,18 @@
         <v-chip :color="statusFilter === 'expired' ? 'error' : undefined" @click="statusFilter = 'expired'">
           Abgelaufen ({{ expiredCount }})
         </v-chip>
+        <template v-if="personOptions.length">
+          <v-divider vertical class="mx-1 d-none d-sm-block" />
+          <v-chip
+            v-for="p in personOptions"
+            :key="p"
+            :color="personFilter === p ? 'secondary' : undefined"
+            prepend-icon="mdi-account"
+            @click="personFilter = personFilter === p ? null : p"
+          >
+            {{ p }}
+          </v-chip>
+        </template>
       </v-col>
     </v-row>
 
@@ -54,23 +66,41 @@
       </v-empty-state>
       <v-card v-for="item in filteredItems" :key="item.id" class="mb-3">
         <v-card-item>
-          <v-card-title class="text-subtitle-1 text-wrap">{{ item.name }}</v-card-title>
+          <v-card-title class="text-subtitle-1 text-wrap">
+            <router-link :to="`/insurances/${item.id}`" class="text-decoration-none text-primary">
+              {{ item.name }}
+            </router-link>
+          </v-card-title>
           <v-card-subtitle>{{ item.versicherer }} · Nr. {{ item.vertragsnummer }}</v-card-subtitle>
         </v-card-item>
         <v-card-text class="pt-0">
           <div class="d-flex flex-wrap ga-2 mb-2">
-            <v-chip size="small" color="primary">{{ item.kategorie }}</v-chip>
+            <v-chip size="small" color="primary" :prepend-icon="categoryIcon(item.kategorie)">{{ item.kategorie }}</v-chip>
+            <v-chip v-if="item.person" size="small" variant="tonal" prepend-icon="mdi-account">{{ item.person }}</v-chip>
             <v-chip size="small" :color="endColor(item.end_date)">
               {{ item.end_date ? `${formatDate(item.end_date)} · ${daysLabel(item.end_date)}` : 'Kein Enddatum' }}
             </v-chip>
+            <v-chip
+              v-if="trendFor(item)"
+              size="small"
+              :color="trendFor(item).pct > 0 ? 'error' : 'success'"
+              variant="tonal"
+              :prepend-icon="trendFor(item).pct > 0 ? 'mdi-trending-up' : 'mdi-trending-down'"
+            >
+              {{ trendLabel(item) }}
+            </v-chip>
           </div>
           <div class="text-body-2">{{ formatEur(item.praemie_eur) }} / {{ item.zahlungsintervall }}</div>
+          <div v-if="shareLabel(item)" class="text-caption text-medium-emphasis">{{ shareLabel(item) }}</div>
           <div v-if="getCancellationInfo(item)" class="text-body-2 mt-1">
             <v-icon size="small" :color="cancellationColor(item)">mdi-calendar-remove</v-icon>
             Kündbar bis {{ formatDate(getCancellationInfo(item).deadline) }}
             <span v-if="getCancellationInfo(item).wirksamZum" class="text-caption text-medium-emphasis">
               · endet dann {{ formatDate(getCancellationInfo(item).wirksamZum) }}
             </span>
+          </div>
+          <div v-for="issue in issuesFor(item)" :key="issue" class="text-caption text-warning mt-1">
+            <v-icon size="x-small" icon="mdi-alert-circle-outline" /> {{ issue }}
           </div>
         </v-card-text>
         <v-card-actions class="pt-0">
@@ -93,11 +123,46 @@
       :items-per-page="20"
       density="comfortable"
     >
+      <template #item.name="{ item }">
+        <router-link
+          :to="`/insurances/${item.id}`"
+          class="text-decoration-none text-primary font-weight-medium"
+        >
+          {{ item.name }}
+        </router-link>
+        <v-chip v-if="item.person" size="x-small" variant="tonal" prepend-icon="mdi-account" class="ml-1">
+          {{ item.person }}
+        </v-chip>
+        <v-tooltip v-if="issuesFor(item).length" location="top">
+          <template #activator="{ props }">
+            <v-icon
+              v-bind="props"
+              icon="mdi-alert-circle-outline"
+              color="warning"
+              size="small"
+              class="ml-1"
+            />
+          </template>
+          <div v-for="issue in issuesFor(item)" :key="issue">• {{ issue }}</div>
+        </v-tooltip>
+      </template>
       <template #item.kategorie="{ item }">
-        <v-chip size="small" color="primary">{{ item.kategorie }}</v-chip>
+        <v-chip size="small" color="primary" :prepend-icon="categoryIcon(item.kategorie)">
+          {{ item.kategorie }}
+        </v-chip>
       </template>
       <template #item.praemie_eur="{ item }">
-        {{ formatEur(item.praemie_eur) }} / {{ item.zahlungsintervall }}
+        <div>{{ formatEur(item.praemie_eur) }} / {{ item.zahlungsintervall }}</div>
+        <div v-if="shareLabel(item)" class="text-caption text-medium-emphasis">{{ shareLabel(item) }}</div>
+        <v-chip
+          v-if="trendFor(item)"
+          size="x-small"
+          :color="trendFor(item).pct > 0 ? 'error' : 'success'"
+          variant="tonal"
+          :prepend-icon="trendFor(item).pct > 0 ? 'mdi-trending-up' : 'mdi-trending-down'"
+        >
+          {{ trendLabel(item) }}
+        </v-chip>
       </template>
       <template #item.end_date="{ item }">
         <v-chip size="small" :color="endColor(item.end_date)">
@@ -151,72 +216,7 @@
       </template>
     </v-data-table>
 
-    <v-dialog v-model="dialog" max-width="600" :fullscreen="smAndDown">
-      <v-card>
-        <v-card-title class="d-flex align-center">
-          {{ editing.id ? 'Versicherung bearbeiten' : 'Neue Versicherung' }}
-          <v-spacer />
-          <v-btn v-if="smAndDown" icon="mdi-close" variant="text" @click="dialog = false" />
-        </v-card-title>
-        <v-card-text>
-          <p class="text-body-2 text-medium-emphasis mb-4">
-            Pflichtfelder zuerst ausfüllen, damit der Vertrag eindeutig zugeordnet werden kann.
-          </p>
-          <v-form>
-            <v-text-field v-model="editing.name" label="Name" required />
-            <v-select v-model="editing.kategorie" :items="kategorien" label="Kategorie" required />
-            <v-text-field v-model="editing.versicherer" label="Versicherer" required />
-            <v-text-field v-model="editing.vertragsnummer" label="Vertragsnummer" required />
-            <v-row>
-              <v-col cols="12" sm="6"><v-text-field v-model="editing.start_date" label="Start" type="date" /></v-col>
-              <v-col cols="12" sm="6"><v-text-field v-model="editing.end_date" label="Ende" type="date" /></v-col>
-            </v-row>
-            <v-row>
-              <v-col cols="12" sm="6">
-                <v-text-field
-                  v-model.number="editing.praemie_eur"
-                  label="Prämie pro Zahlung (€)"
-                  type="number"
-                  hint="Betrag je Zahlungsperiode, z.&thinsp;B. 50 bei monatlicher Zahlung"
-                  persistent-hint
-                />
-              </v-col>
-              <v-col cols="12" sm="6"><v-select v-model="editing.zahlungsintervall" :items="intervals" label="Intervall" /></v-col>
-            </v-row>
-            <v-row>
-              <v-col cols="12" sm="6">
-                <v-text-field
-                  v-model="kuendigungBisInput"
-                  label="Kündbar jeweils bis (TT.MM.) – optional"
-                  placeholder="z. B. 30.09."
-                  hint="Leer lassen, wenn unbekannt"
-                  persistent-hint
-                  clearable
-                  :rules="[recurringDateRule]"
-                />
-              </v-col>
-              <v-col cols="12" sm="6">
-                <v-text-field
-                  v-model="kuendigungZumInput"
-                  label="Vertrag endet dann zum (TT.MM.) – optional"
-                  placeholder="z. B. 31.12."
-                  hint="Leer lassen, wenn unbekannt"
-                  persistent-hint
-                  clearable
-                  :rules="[recurringDateRule]"
-                />
-              </v-col>
-            </v-row>
-            <v-textarea v-model="editing.notes" label="Notizen" rows="2" />
-          </v-form>
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn @click="dialog = false">Abbrechen</v-btn>
-          <v-btn color="primary" :disabled="!canSave" @click="save">Speichern</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
+    <InsuranceFormDialog v-model="dialog" :insurance="formTarget" @saved="onSaved" />
 
     <v-dialog v-model="recDialog" max-width="540" :fullscreen="smAndDown">
       <v-card>
@@ -300,6 +300,14 @@
                 Hochgeladen am {{ formatDate(d.uploaded_at) }}<template v-if="d.ai_summary"> · KI-analysiert</template>
               </v-list-item-subtitle>
               <template #append>
+                <v-btn
+                  icon="mdi-open-in-new"
+                  size="small"
+                  variant="text"
+                  aria-label="Dokument ansehen"
+                  :href="`/api/documents/${d.id}/file`"
+                  target="_blank"
+                />
                 <v-btn icon="mdi-delete" size="small" variant="text" color="error" @click="confirmDocDelete(d)" />
               </template>
             </v-list-item>
@@ -354,25 +362,33 @@
       </v-card>
     </v-dialog>
 
-    <v-snackbar v-model="snack.show" :color="snack.color">{{ snack.text }}</v-snackbar>
+    <v-snackbar v-model="snack.show" :color="snack.color" :timeout="snack.undo ? 5000 : 4000">
+      {{ snack.text }}
+      <template v-if="snack.undo" #actions>
+        <v-btn variant="text" @click="undoDelete">Rückgängig</v-btn>
+      </template>
+    </v-snackbar>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from 'vuetify'
 import { insurancesApi, documentsApi } from '../api'
-import { insuranceCategories, paymentIntervals } from '../constants'
+import InsuranceFormDialog from '../components/InsuranceFormDialog.vue'
+import { categoryIcon } from '../constants'
 import {
   daysLabel,
   daysUntil,
   expiryColor,
   formatCurrency,
   formatDate,
-  formatRecurringDate,
   getCancellationInfo,
-  parseRecurringDate,
+  persistedRef,
+  premiumTrend,
+  qualityIssues,
+  yearlyPremium,
 } from '../utils'
 
 const route = useRoute()
@@ -384,10 +400,12 @@ const recDialog = ref(false)
 const rec = ref(null)
 const recLoading = ref(false)
 const recTarget = ref(null)
-const editing = ref({})
+const formTarget = ref(null)
 const snack = ref({ show: false, color: 'success', text: '' })
 const search = ref('')
-const statusFilter = ref('all')
+// Filterwahl überlebt Seitenwechsel und Neustarts
+const statusFilter = persistedRef('versicherung-filter-insurances', 'all')
+const personFilter = persistedRef('versicherung-filter-person', null)
 const initialLoading = ref(true)
 const deleteDialog = ref(false)
 const deleteTarget = ref(null)
@@ -410,13 +428,6 @@ const headers = [
   { title: '', key: 'actions', sortable: false, align: 'end' },
 ]
 
-// Eingabe der Kündigungsdaten als "TT.MM."-Strings (werden beim Speichern geparst)
-const kuendigungBisInput = ref('')
-const kuendigungZumInput = ref('')
-
-const recurringDateRule = (v) =>
-  parseRecurringDate(v) !== undefined || 'Format TT.MM., z. B. 30.09.'
-
 function cancellationColor(item) {
   const info = getCancellationInfo(item)
   if (!info) return 'grey'
@@ -426,19 +437,22 @@ function cancellationColor(item) {
   return 'success'
 }
 
-const kategorien = insuranceCategories
-const intervals = paymentIntervals
-
 const pdfUrl = '/api/exports/insurances.pdf'
 const xlsxUrl = '/api/exports/insurances.xlsx'
 
 const recColor = computed(() => ({ keiner: 'success', pruefen: 'warning', handeln: 'error' })[rec.value?.handlungsbedarf?.toLowerCase?.()] || 'grey')
 const formatEur = formatCurrency
 const endColor = expiryColor
+// Vorhandene Personen-Labels für die Filter-Chips
+const personOptions = computed(() =>
+  [...new Set(items.value.map((i) => i.person).filter(Boolean))].sort()
+)
+
 const filteredItems = computed(() => {
   const query = search.value.trim().toLowerCase()
   return items.value.filter((item) => {
-    const matchesQuery = !query || [item.name, item.kategorie, item.versicherer, item.vertragsnummer]
+    if (personFilter.value && item.person !== personFilter.value) return false
+    const matchesQuery = !query || [item.name, item.kategorie, item.versicherer, item.vertragsnummer, item.person]
       .filter(Boolean)
       .some((value) => value.toLowerCase().includes(query))
     if (!matchesQuery) return false
@@ -457,79 +471,125 @@ const expiredCount = computed(() => items.value.filter((item) => {
   const days = daysUntil(item.end_date)
   return days != null && days < 0
 }).length)
+// Summe aller Jahresprämien — Basis für den Kostenanteil je Vertrag
+const totalYearly = computed(() =>
+  items.value.reduce((sum, i) => sum + (yearlyPremium(i) ?? 0), 0)
+)
+
+// "600 € p.a. · 12 % der Gesamtkosten" — leer, wenn keine Prämie bekannt
+function shareLabel(item) {
+  const yearly = yearlyPremium(item)
+  if (yearly == null || yearly <= 0) return ''
+  let label = `${formatCurrency(yearly)} p.a.`
+  if (totalYearly.value > 0) {
+    label += ` · ${Math.round((yearly / totalYearly.value) * 100)} % der Gesamtkosten`
+  }
+  return label
+}
+
 const canSave = computed(() => Boolean(
   editing.value.name &&
   editing.value.kategorie &&
   editing.value.versicherer &&
   editing.value.vertragsnummer
 ))
+// IDs aller Versicherungen, die mindestens ein Dokument haben (für den Datenqualitäts-Check)
+const insuranceIdsWithDocs = ref(new Set())
+// Prämienverlauf je Versicherung (für den Trend-Chip)
+const historyByInsurance = ref({})
+
+function issuesFor(item) {
+  return qualityIssues(item, insuranceIdsWithDocs.value.has(item.id))
+}
+
+function trendFor(item) {
+  return premiumTrend(historyByInsurance.value[item.id])
+}
+
+function trendLabel(item) {
+  const t = trendFor(item)
+  return t ? `${t.pct > 0 ? '+' : ''}${t.pct} % seit ${t.sinceYear}` : ''
+}
+
 async function load() {
   try {
-    items.value = await insurancesApi.list()
+    const [insurances, allDocs, history] = await Promise.all([
+      insurancesApi.list(),
+      documentsApi.list(),
+      insurancesApi.premiumHistory(),
+    ])
+    items.value = insurances
+    insuranceIdsWithDocs.value = new Set(allDocs.filter((d) => d.insurance_id != null).map((d) => d.insurance_id))
+    const grouped = {}
+    for (const h of history) {
+      ;(grouped[h.insurance_id] ??= []).push(h)
+    }
+    historyByInsurance.value = grouped
   } catch (e) {
     snack.value = { show: true, color: 'error', text: 'Laden fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
   }
 }
 
 function openNew() {
-  editing.value = { kategorie: 'Sonstige', zahlungsintervall: 'jährlich', notes: '' }
-  kuendigungBisInput.value = ''
-  kuendigungZumInput.value = ''
+  formTarget.value = null
   dialog.value = true
 }
 function openEdit(item) {
-  editing.value = { ...item }
-  kuendigungBisInput.value = formatRecurringDate(item.kuendigung_bis_tag, item.kuendigung_bis_monat)
-  kuendigungZumInput.value = formatRecurringDate(item.kuendigung_zum_tag, item.kuendigung_zum_monat)
+  formTarget.value = item
   dialog.value = true
 }
-async function save() {
-  try {
-    const payload = { ...editing.value }
-    delete payload.created_at
-    // '' (geleertes Zahlenfeld) → null, sonst lehnt das Backend mit 422 ab
-    if (payload.praemie_eur === '' || payload.praemie_eur == null) payload.praemie_eur = null
-    if (payload.start_date === '') payload.start_date = null
-    if (payload.end_date === '') payload.end_date = null
-
-    // Kündigungsdaten aus den "TT.MM."-Eingaben übernehmen
-    const bis = parseRecurringDate(kuendigungBisInput.value)
-    const zum = parseRecurringDate(kuendigungZumInput.value)
-    if (bis === undefined || zum === undefined) {
-      snack.value = { show: true, color: 'error', text: 'Kündigungsdatum bitte als TT.MM. angeben, z. B. 30.09.' }
-      return
-    }
-    payload.kuendigung_bis_tag = bis?.tag ?? null
-    payload.kuendigung_bis_monat = bis?.monat ?? null
-    payload.kuendigung_zum_tag = zum?.tag ?? null
-    payload.kuendigung_zum_monat = zum?.monat ?? null
-
-    if (editing.value.id) {
-      await insurancesApi.update(editing.value.id, payload)
-    } else {
-      await insurancesApi.create(payload)
-    }
-    dialog.value = false
-    await load()
-  } catch (e) {
-    snack.value = { show: true, color: 'error', text: 'Speichern fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
-  }
+async function onSaved() {
+  snack.value = { show: true, color: 'success', text: 'Versicherung gespeichert' }
+  await load()
 }
 function confirmDelete(item) {
   deleteTarget.value = item
   deleteDialog.value = true
 }
-async function onDelete() {
-  deleteDialog.value = false
-  try {
-    await insurancesApi.delete(deleteTarget.value.id)
-    await load()
-  } catch (e) {
-    snack.value = { show: true, color: 'error', text: 'Löschen fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
-  } finally {
-    deleteTarget.value = null
-  }
+
+// Lösch-Undo: Eintrag verschwindet sofort aus der Liste, der API-Aufruf läuft
+// erst nach 5 s — solange kann „Rückgängig" ihn abbrechen. Beim Verlassen der
+// Seite wird eine ausstehende Löschung sofort ausgeführt.
+let pendingDelete = null
+
+function flushPendingDelete() {
+  if (!pendingDelete) return
+  clearTimeout(pendingDelete.timer)
+  const { item } = pendingDelete
+  pendingDelete = null
+  insurancesApi.delete(item.id).catch(() => {})
 }
+
+function onDelete() {
+  deleteDialog.value = false
+  const item = deleteTarget.value
+  deleteTarget.value = null
+  flushPendingDelete() // vorherige ausstehende Löschung zuerst ausführen
+  items.value = items.value.filter((i) => i.id !== item.id)
+  pendingDelete = {
+    item,
+    timer: setTimeout(async () => {
+      pendingDelete = null
+      try {
+        await insurancesApi.delete(item.id)
+      } catch (e) {
+        snack.value = { show: true, color: 'error', text: 'Löschen fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
+        await load()
+      }
+    }, 5000),
+  }
+  snack.value = { show: true, color: 'info', text: `„${item.name}" gelöscht.`, undo: true }
+}
+
+async function undoDelete() {
+  if (!pendingDelete) return
+  clearTimeout(pendingDelete.timer)
+  pendingDelete = null
+  snack.value = { show: true, color: 'success', text: 'Löschen rückgängig gemacht.' }
+  await load()
+}
+
+onBeforeUnmount(flushPendingDelete)
 const hasNewDocFiles = computed(() => {
   const f = newDocFiles.value
   return Array.isArray(f) ? f.length > 0 : Boolean(f)
@@ -574,9 +634,18 @@ async function attachDocs() {
     }
     newDocFiles.value = []
     docs.value = await documentsApi.list(docTarget.value.id)
+    syncDocFlag(docTarget.value.id, docs.value.length > 0)
   } finally {
     attaching.value = false
   }
+}
+
+// Dokument-Status für den Datenqualitäts-Check aktuell halten (Set klonen für Reaktivität)
+function syncDocFlag(insuranceId, hasDocs) {
+  const next = new Set(insuranceIdsWithDocs.value)
+  if (hasDocs) next.add(insuranceId)
+  else next.delete(insuranceId)
+  insuranceIdsWithDocs.value = next
 }
 
 function confirmDocDelete(d) {
@@ -589,6 +658,7 @@ async function onDocDelete() {
   try {
     await documentsApi.delete(docDeleteTarget.value.id)
     docs.value = await documentsApi.list(docTarget.value.id)
+    syncDocFlag(docTarget.value.id, docs.value.length > 0)
   } catch (e) {
     snack.value = { show: true, color: 'error', text: 'Löschen fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
   } finally {

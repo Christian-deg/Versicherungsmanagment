@@ -158,14 +158,20 @@ Wenn diese Werte fehlen:
 
 Der APScheduler läuft im Backend-Prozess.
 
-Job:
+Jobs:
 
-- täglicher Notification-Check um 08:00 Uhr lokaler Zeit
+- täglich 08:00 Uhr lokaler Zeit — Notification-Check + Bereinigung verwaister Uploads
+- wöchentlich (Mo 03:00) — Auffrischung von Empfehlungen, die älter als ein Jahr sind
+- monatlich (1., 02:00 UTC) — konsistentes SQLite-Backup (Aufbewahrung 3 Monate)
 
-Verarbeitung:
+Verarbeitung beim Notification-Check:
 
-- Pending-Einträge für Versicherungen und Produkte erzeugen
-- fällige Meldungen senden
+- Pending-Einträge erzeugen für:
+  - Vertragsabläufe und Garantieenden (90/30/7 Tage vorher)
+  - Kündigungsfristen „kündbar bis" (30/7 Tage vorher, jährlich wiederkehrend)
+- veraltete Einträge (Vertrag gelöscht/Datum geändert) verwerfen
+- fällige Meldungen senden; fehlgeschlagene Sendungen werden bis 3 Tage nach
+  Fälligkeit erneut versucht
 - Versandstatus speichern
 
 ## Sicherheit im Betrieb
@@ -175,7 +181,7 @@ Wichtige Maßnahmen:
 - keine Secrets in Quellcode oder Prompts eintragen
 - `.env` nicht committen
 - Datenverzeichnis gegen unbefugten Zugriff schützen
-- Upload-Größenlimit bei 10 MB belassen oder bewusst ändern
+- Upload-Größenlimits (80 MB Dokumente / 10 MB Rechnungen) belassen oder bewusst ändern
 - nur erlaubte Dateitypen zulassen
 - Reverse Proxy und TLS für externen Zugriff ergänzen
 
@@ -197,9 +203,12 @@ Erwartete Antwort:
 
 ### Sinnvolle Regelaufgaben
 
-- Backups prüfen
+- Backups prüfen (der Scheduler legt monatlich automatisch ein SQLite-Backup unter `data/db/` an)
 - Logs kontrollieren
 - Pushover-Zustellung testen
+- Suchindex prüfen: im Assistenten den Button **Suchindex prüfen** ausführen
+  (oder `POST /api/documents/maintenance/reindex`) — fehlende Dokumente werden
+  automatisch nachindiziert
 - API-Schlüssel auf Gültigkeit prüfen
 - Abhängigkeiten und Modelle bei Bedarf aktualisieren
 
@@ -234,7 +243,10 @@ Prüfen:
 
 - ob Pushover-Schlüssel gesetzt sind
 - ob das Enddatum bzw. Garantieende korrekt erfasst wurde
+- ob für Kündigungs-Warnungen die Felder „kündbar bis" (Tag + Monat) gepflegt sind
 - ob der Scheduler im Backend gestartet wurde
+- ob der Rechner/Container zur Trigger-Zeit (08:00) lief — verpasste Stufen
+  werden beim nächsten Lauf innerhalb des Warnbands nachgeholt
 
 ### Daten fehlen nach Neustart
 

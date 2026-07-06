@@ -51,6 +51,10 @@ class NotificationStatus(str, Enum):
 NOTIFICATION_TRIGGERS_DAYS = (90, 30, 7)
 PRIORITY_HIGH_DAYS = 7  # ≤7 Tage → priority=1
 
+# Warnstufen für Kündigungsfristen ("kündbar bis") — kürzer als bei Abläufen,
+# weil die Frist jährlich wiederkehrt und 90 Tage vorher zu früh wäre
+CANCELLATION_TRIGGERS_DAYS = (30, 7)
+
 # Anzahl Zahlungen pro Jahr je Intervall (praemie_eur ist der Betrag je Zahlung)
 INTERVALS_PER_YEAR: dict[Zahlungsintervall, int] = {
     Zahlungsintervall.MONATLICH: 12,

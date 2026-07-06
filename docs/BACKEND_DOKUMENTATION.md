@@ -42,6 +42,7 @@ Enthält alle FastAPI-Router:
 - `invoices.py`
 - `documents.py`
 - `chat.py`
+- `notifications.py`
 - `exports.py`
 
 ### `app/agents`
@@ -129,6 +130,8 @@ In SQLite werden insbesondere folgende Entitäten verwaltet:
 - Dokumente
 - Rechnungen
 - Benachrichtigungen
+- Prämienverlauf (`premium_history`: Startwert bei Anlage, neuer Eintrag bei
+  jeder Änderung von Prämie/Zahlungsintervall — macht Beitragserhöhungen sichtbar)
 
 Typische Inhalte:
 
@@ -194,9 +197,25 @@ genutzt und ermöglichen Fragen zu konkreten Vertragsbedingungen.
 ### 4. Tägliche Benachrichtigungen
 
 1. Scheduler startet täglich um 08:00 Uhr lokaler Zeit
-2. Fehlende Pending-Notifications für 90/30/7 Tage werden erzeugt
-3. Fällige Notifications werden per Pushover versendet
-4. Status wird auf `SENT` oder `FAILED` gesetzt
+2. Fehlende Pending-Notifications werden erzeugt:
+   - Vertragsabläufe und Garantieenden: Stufen 90/30/7 Tage
+   - Kündigungsfristen („kündbar bis", jährlich wiederkehrend): Stufen 30/7 Tage
+3. Veraltete Notifications (Vertrag gelöscht oder Datum geändert) werden verworfen
+4. Fällige Notifications werden per Pushover versendet
+5. Status wird auf `SENT` oder `FAILED` gesetzt; `FAILED` wird bis 3 Tage nach
+   Fälligkeit erneut versucht
+
+Deduplizierung: Schlüssel ist `(ref_type, ref_id, days_before, target_date)`.
+`target_date` ist das konkrete Ablauf- bzw. Fristdatum — nach einer
+Vertragsverlängerung (neues `end_date`) oder im Folgejahr (neue Kündigungs-
+Deadline) startet dadurch automatisch ein neuer Warnzyklus.
+
+### 5. Aktualisierung einer Versicherung
+
+Beim `PUT /api/insurances/{id}` mit geänderten Feldern werden die RAG-Metadaten
+aller zugehörigen Dokumente im Hintergrund neu eingebettet. Der bereits
+extrahierte Volltext wird dabei aus den vorhandenen Chunks exakt rekonstruiert
+(fester Chunk-Overlap) — es fällt kein erneutes OCR an.
 
 ## API-Bereiche
 
@@ -208,7 +227,13 @@ Zuständig für:
 - Anlegen
 - Bearbeiten
 - Löschen
-- Finanzzusammenfassung
+- Finanzzusammenfassung (inkl. Aufteilung nach Kategorie und Person)
+- Prämienverlauf (`GET /history/premiums`); die Prämienentwicklung fließt
+  zusätzlich als Signal in die Empfehlungs-Zusammenfassung ein
+
+Das Feld `person` („gehört zu") ist ein freies Familien-Label ohne
+Benutzerverwaltung; es fließt in RAG-Metadaten und QA-Tools ein, damit der
+Chat Fragen wie „welche Versicherungen gehören zu X?" beantworten kann.
 
 ### Produkte
 
@@ -216,17 +241,23 @@ Zuständig für:
 
 - Listen
 - Anlegen
-- Bearbeiten
+- Bearbeiten (inkl. Seriennummer und Archiv-Status)
 - Löschen
-- Garantie-Ampel-Zusammenfassung
+- Garantie-Ampel-Zusammenfassung (ohne archivierte Produkte)
+
+Archivierte Produkte (verkauft/entsorgt) sind aus Ampel, Garantie-Warnungen
+und ICS-Feed ausgenommen; ihre Belege bleiben bis zum Ende der
+Aufbewahrungsfrist erhalten.
 
 ### Rechnungen
 
 Zuständig für:
 
 - Hochladen von Kaufbelegen (PDF/Bild) zu einem Produkt
+- KI-Analyse (Kaufdatum, Betrag, Produktname, Garantiedauer in Monaten)
 - Automatische Berechnung der Aufbewahrungsfrist
 - Listen und Filtern nach Produkt
+- Ansicht im Browser (`GET /{id}/file`, inline) und Download
 - Löschen nach Ablauf der Aufbewahrungsfrist
 
 ### Dokumente
@@ -235,6 +266,11 @@ Zuständig für:
 
 - Upload und Analyse
 - Bestätigung der Extraktion
+- Zuordnung eines analysierten Dokuments zu einem bestehenden Vertrag
+  (`POST /assign/{id}`, Duplikat-Erkennung)
+- Ansicht gespeicherter Dateien im Browser (`GET /{id}/file`, inline)
+- Suchindex-Wartung (`POST /maintenance/reindex`): fehlende Dokumente werden
+  im Hintergrund neu eingebettet
 - Auslösen von Empfehlungen
 
 ### Chat
@@ -243,6 +279,14 @@ Zuständig für:
 
 - Q&A mit RAG-Agent
 
+### Erinnerungen
+
+Zuständig für:
+
+- Verlauf der Frist-Warnungen (`GET /api/notifications`)
+- Pushover-Test (`POST /api/notifications/test`) — Konfigurationsfehler fallen
+  sofort auf, nicht erst bei einer verpassten Frist
+
 ### Exporte
 
 Zuständig für:
@@ -250,6 +294,10 @@ Zuständig für:
 - Versicherungen als PDF
 - Versicherungen als Excel
 - Produkte als Excel
+- ICS-Kalender-Feed (`calendar.ics`) mit Abläufen, Garantieenden und jährlich
+  wiederkehrenden Kündigungsfristen — zum Abonnieren in Kalender-Apps
+- Komplett-Backup (`backup.zip`): konsistente DB-Kopien (SQLite-Backup-API)
+  plus alle Dokumente/Belege, ZIP_STORED für schnellen Export
 
 ## Agenten im Backend
 
@@ -310,12 +358,16 @@ Der Storage-Service übernimmt:
 - Dateitypprüfung
 - sichere Dateispeicherung
 - Pfad-Traversal-Schutz
-- PDF-zu-Bild-Umwandlung für die Vision-Analyse
+- Auflösen gespeicherter Pfade gegen das aktuelle Datenverzeichnis
+  (`resolve_stored_path`) — macht die Daten zwischen Docker (`/app/data/…`)
+  und lokalem Betrieb portabel
+- PDF-zu-Bild-Umwandlung für die Vision-Analyse (mit Pixel-Deckel von
+  ~20 Megapixeln pro Seite als Schutz vor PDF-Dekompressions-Bomben)
 - nativer PDF-Volltext-Extraktion (PyMuPDF `get_text()`)
 
 ### Sicherheitsrelevante Regeln
 
-- maximal 10 MB pro Upload
+- maximal 80 MB pro Versicherungsdokument, 10 MB pro Rechnung
 - erlaubte Typen: PDF, PNG, JPG, JPEG
 - sichere Zielpfade unterhalb von `documents_dir` bzw. `invoices_dir`
 - Dateinamen im Ziel mit UUID statt Originalname
@@ -327,12 +379,22 @@ Der Embedding-Service übernimmt:
 
 - Zeichen-basiertes Chunking mit Überlappung
 - Embedding-Erzeugung via OpenAI (`text-embedding-3-small`)
-- Speicherung im Vektorindex
+- Speicherung im Vektorindex (Chunks eines Dokuments werden atomar ersetzt —
+  keine verwaisten Alt-Chunks beim Neu-Embedden)
 - semantische Suche für Nutzerfragen
 - Löschen aller Chunks zu einem Dokument
+- Metadaten-Refresh nach Vertragsänderungen (`refresh_insurance_metadata`):
+  rekonstruiert den Volltext aus vorhandenen Chunks und embedded mit
+  aktualisiertem Metadaten-Block neu — ohne erneutes OCR
+- Konsistenz-Check (`existing_document_ids`) für die Suchindex-Wartung
+- Volltext-Obergrenze von 200.000 Zeichen je Dokument (Kostenschutz)
 - Vision-OCR-Fallback: bei Dokumenten ohne nativen Textlayer werden die gerenderten
   PNG-Seiten via `gpt-5.4-mini` (Vision, `detail=high`) transkribiert; je Seite max.
   4000 Output-Tokens; Fehler einzelner Seiten werden abgefangen
+
+Blockierende Arbeit (PDF-Rendering, Datei-I/O, SQLite-Zugriffe) läuft in
+Threads (`anyio.to_thread`), damit der Event-Loop während großer Uploads
+für Chat und Dashboard frei bleibt.
 
 ## Export-Service über Router
 
@@ -344,7 +406,8 @@ Unterstützte Formate:
 - XLSX für Versicherungen
 - XLSX für Produkte
 
-Die Exporte werden als `StreamingResponse` ausgeliefert.
+Die Exporte werden als `StreamingResponse` ausgeliefert (ICS als `Response`
+mit `text/calendar`).
 
 ## Scheduler und Notifications
 
@@ -352,24 +415,30 @@ Der Scheduler läuft im Backend-Prozess.
 
 ### Trigger
 
-- täglich um 08:00
+- täglich um 08:00 — Notifications berechnen und versenden, verwaiste Uploads bereinigen
+- wöchentlich (Mo 03:00) — Empfehlungen auffrischen, die älter als ein Jahr sind
+- monatlich (1., 02:00 UTC) — konsistentes SQLite-Backup (3 Monate Aufbewahrung)
 
 ### Benachrichtigungslogik
 
-- 90 Tage vor Ablauf
-- 30 Tage vor Ablauf
-- 7 Tage vor Ablauf
+- Vertragsablauf / Garantieende: 90, 30 und 7 Tage vorher (je engste Stufe)
+- Kündigungsfrist („kündbar bis"): 30 und 7 Tage vorher, jährlich wiederkehrend
+- Deduplizierung über `(ref_type, ref_id, days_before, target_date)` —
+  Verlängerungen und Folgejahre starten automatisch einen neuen Warnzyklus
 
 ### Prioritäten
 
-- 7 Tage: hohe Priorität
-- 30/90 Tage: normale Priorität
+- ≤7 Tage: hohe Priorität (Pushover priority=1)
+- sonst: normale Priorität
 
 ### Fehlerverhalten
 
 - Pushover-Konfigurationsfehler führen nicht zum kompletten Serverabbruch
-- fehlerhafte Sends werden als `FAILED` markiert
+- fehlerhafte Sends werden als `FAILED` markiert und bis 3 Tage nach
+  Fälligkeit bei den nächsten Läufen erneut versucht
 - erfolgreiche Sends werden als `SENT` markiert
+- veraltete Warnungen (Eintrag gelöscht, Datum geändert) werden vor dem
+  Versand erkannt und entfernt
 
 ## CORS
 

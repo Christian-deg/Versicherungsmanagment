@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import chat, documents, exports, insurances, invoices, products
+from app.api import chat, documents, exports, insurances, invoices, notifications, products
 from app.config import settings
 from app.models.database import init_db
 from app.scheduler.notification_job import start_scheduler, stop_scheduler
@@ -41,6 +41,7 @@ app.include_router(invoices.router, prefix="/api/invoices", tags=["invoices"])
 app.include_router(documents.router, prefix="/api/documents", tags=["documents"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(exports.router, prefix="/api/exports", tags=["exports"])
+app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
 
 
 @app.get("/api/health")

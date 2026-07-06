@@ -7,6 +7,31 @@
           Stelle Fragen in Alltagssprache und erhalte Antworten mit Quellen aus deinen gespeicherten Daten.
         </p>
       </div>
+      <v-spacer />
+      <div class="d-flex ga-2">
+        <v-tooltip text="Prüft, ob alle Dokumente im Suchindex sind, und indiziert Fehlende nach" location="bottom">
+          <template #activator="{ props }">
+            <v-btn
+              v-bind="props"
+              variant="outlined"
+              prepend-icon="mdi-database-refresh"
+              :loading="reindexing"
+              @click="checkIndex"
+            >
+              Suchindex prüfen
+            </v-btn>
+          </template>
+        </v-tooltip>
+        <v-btn
+          v-if="messages.length"
+          variant="outlined"
+          prepend-icon="mdi-broom"
+          :disabled="loading"
+          @click="newChat"
+        >
+          Neuer Chat
+        </v-btn>
+      </div>
     </div>
 
     <v-card class="mb-4" min-height="300">
@@ -35,8 +60,8 @@
             </v-chip>
           </div>
           <v-card
-            :color="m.role === 'user' ? 'blue-lighten-5' : 'grey-lighten-4'"
-            flat
+            :color="m.role === 'user' ? 'primary' : 'secondary'"
+            variant="tonal"
             class="pa-3"
             :class="m.role === 'user' ? 'ml-auto' : ''"
             :max-width="smAndDown ? '95%' : '80%'"
@@ -50,8 +75,9 @@
             </v-chip>
           </v-card>
         </div>
-        <div v-if="loading" class="text-center">
-          <v-progress-circular indeterminate />
+        <div v-if="loading" class="d-flex align-center ga-3 pa-2">
+          <v-progress-circular indeterminate size="20" width="2" color="primary" />
+          <span class="text-medium-emphasis">{{ loadingText }}</span>
         </div>
       </v-card-text>
     </v-card>
@@ -87,22 +113,108 @@
         </div>
       </v-card-text>
     </v-card>
+
+    <v-snackbar v-model="snack.show" :color="snack.color" timeout="6000">{{ snack.text }}</v-snackbar>
   </div>
 </template>
 
 <script setup>
-import { nextTick, ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useDisplay } from 'vuetify'
-import { chatApi } from '../api'
+import { chatApi, documentsApi } from '../api'
 import { chatExampleQuestions } from '../constants'
 import { confidenceColor } from '../utils'
 
 const { smAndDown } = useDisplay()
+const route = useRoute()
 const input = ref('')
+
+// Kontext-Einstieg von Detailseiten ("Frage zum Vertrag/Produkt"):
+// Eingabefeld mit Bezug vorbefüllen, Frage formuliert der Nutzer selbst
+if (typeof route.query.context === 'string' && route.query.context) {
+  input.value = `Zu „${route.query.context}": `
+}
 const messages = ref([])
 const loading = ref(false)
 const exampleQuestions = chatExampleQuestions
 const messagesContainer = ref(null)
+
+// Verlauf überlebt Seitenwechsel (pro Browser-Tab) — vorher war der Chat nach
+// jedem Navigieren weg
+const STORAGE_KEY = 'versicherung-chat'
+try {
+  messages.value = JSON.parse(sessionStorage.getItem(STORAGE_KEY)) || []
+} catch {
+  messages.value = []
+}
+watch(
+  messages,
+  (v) => {
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(v))
+    } catch {
+      /* Speicher voll o.ä. — Persistenz ist nur Komfort */
+    }
+  },
+  { deep: true }
+)
+
+function newChat() {
+  messages.value = []
+  sessionStorage.removeItem(STORAGE_KEY)
+}
+
+// Rotierender Status während der Agent arbeitet — die Antwort selbst kann nicht
+// gestreamt werden, ohne den Output-Sicherheitsfilter zu umgehen (er prüft die
+// vollständige Antwort, bevor sie den Server verlässt)
+const loadingTexts = [
+  'Durchsuche deine Dokumente…',
+  'Prüfe Vertragsdaten…',
+  'Formuliere Antwort…',
+  'Gleich fertig…',
+]
+const loadingText = ref(loadingTexts[0])
+let loadingTimer = null
+watch(loading, (active) => {
+  clearInterval(loadingTimer)
+  if (active) {
+    let i = 0
+    loadingText.value = loadingTexts[0]
+    loadingTimer = setInterval(() => {
+      i = Math.min(i + 1, loadingTexts.length - 1)
+      loadingText.value = loadingTexts[i]
+    }, 3500)
+  }
+})
+
+// Suchindex-Wartung: prüft die Vollständigkeit des Vektorindex und stößt
+// fehlende Embeddings im Hintergrund neu an
+const reindexing = ref(false)
+const snack = ref({ show: false, color: 'success', text: '' })
+
+async function checkIndex() {
+  reindexing.value = true
+  try {
+    const res = await documentsApi.reindex()
+    snack.value = {
+      show: true,
+      color: res.fehlend === 0 ? 'success' : 'info',
+      text:
+        res.fehlend === 0
+          ? `Suchindex vollständig — alle ${res.dokumente} Dokumente sind indiziert.`
+          : `${res.fehlend} von ${res.dokumente} Dokumenten fehlten im Index und werden jetzt nachindiziert — das kann einige Minuten dauern.`,
+    }
+  } catch (e) {
+    snack.value = {
+      show: true,
+      color: 'error',
+      text: 'Index-Prüfung fehlgeschlagen: ' + (e.response?.data?.detail || e.message),
+    }
+  } finally {
+    reindexing.value = false
+  }
+}
 
 const confColor = confidenceColor
 

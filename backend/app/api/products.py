@@ -49,16 +49,23 @@ def warranty_status(db: Session = Depends(get_db)) -> dict:
     dem end_date einer verknüpften Versicherung (sofern vorhanden).
     """
     today = date.today()
-    rows = db.query(Product).all()
+    # Archivierte Produkte (verkauft/entsorgt) zählen nicht mehr zur Ampel
+    rows = db.query(Product).filter(Product.archived.is_(False)).all()
+    # Verknüpfte Versicherungen in einem Rutsch laden (statt N+1-Queries)
+    linked_ids = {r.linked_insurance_id for r in rows if r.linked_insurance_id}
+    ins_end_dates: dict[int, date | None] = {}
+    if linked_ids:
+        ins_end_dates = {
+            i.id: i.end_date
+            for i in db.query(Insurance).filter(Insurance.id.in_(linked_ids)).all()
+        }
     out = {"green": 0, "yellow": 0, "red": 0, "expired": 0, "no_warranty": 0}
     for r in rows:
         # Effektives Enddatum: eigene Garantie ODER verknüpfte Versicherung
         eff_end = r.warranty_end
-        if r.linked_insurance_id:
-            ins = db.get(Insurance, r.linked_insurance_id)
-            if ins and ins.end_date:
-                if eff_end is None or ins.end_date > eff_end:
-                    eff_end = ins.end_date
+        ins_end = ins_end_dates.get(r.linked_insurance_id) if r.linked_insurance_id else None
+        if ins_end and (eff_end is None or ins_end > eff_end):
+            eff_end = ins_end
 
         if not eff_end:
             out["no_warranty"] += 1

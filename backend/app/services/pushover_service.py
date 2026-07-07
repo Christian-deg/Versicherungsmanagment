@@ -52,3 +52,15 @@ async def send_push(
     if resp.status_code != 200:
         raise PushoverError(f"Pushover-Fehler {resp.status_code}: {resp.text[:200]}")
     log.info("Pushover gesendet: '%s' (priority=%d)", title, priority)
+
+
+async def notify_failure(title: str, message: str) -> None:
+    """Fire-and-forget-Störungsmeldung für Hintergrund-Tasks.
+
+    Verschluckt bewusst alle Fehler inklusive fehlender Konfiguration — eine
+    Störungsmeldung darf den eigentlichen Task nie zusätzlich brechen.
+    """
+    try:
+        await send_push(title, message)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Störungs-Push '%s' nicht gesendet: %s", title, e)

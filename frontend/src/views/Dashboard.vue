@@ -40,14 +40,51 @@
             </div>
           </v-col>
           <v-col cols="12" md="4">
-            <v-sheet color="white" rounded="lg" class="pa-4 text-primary">
-              <div class="text-overline">Fristen in den nächsten 90 Tagen</div>
+            <v-sheet
+              color="white"
+              rounded="lg"
+              class="pa-4 text-primary"
+              :style="upcomingDeadlineCount ? 'cursor: pointer' : ''"
+              @click="upcomingDeadlineCount && (deadlineDetailsOpen = !deadlineDetailsOpen)"
+            >
+              <div class="d-flex align-center justify-space-between">
+                <div class="text-overline">Fristen in den nächsten 90 Tagen</div>
+                <v-icon v-if="upcomingDeadlineCount" size="small">
+                  {{ deadlineDetailsOpen ? 'mdi-chevron-up' : 'mdi-chevron-down' }}
+                </v-icon>
+              </div>
               <div class="text-h4">{{ upcomingDeadlineCount }}</div>
               <div class="text-body-2">
                 {{ upcomingDeadlineCount
-                  ? 'Abläufe und Kündigungsfristen prüfen'
+                  ? (deadlineDetailsOpen ? 'Antippen zum Einklappen' : 'Antippen für Details')
                   : 'Keine Fristen in den nächsten 90 Tagen' }}
               </div>
+              <v-expand-transition>
+                <div v-show="deadlineDetailsOpen">
+                  <v-divider class="my-2" />
+                  <div
+                    v-for="d in upcomingDeadlines"
+                    :key="d.key"
+                    class="d-flex align-center justify-space-between py-1 ga-2"
+                  >
+                    <div class="flex-grow-1" style="min-width: 0">
+                      <div class="text-truncate">
+                        <router-link
+                          :to="`/insurances/${d.id}`"
+                          class="text-primary font-weight-medium text-decoration-none"
+                          @click.stop
+                        >
+                          {{ d.name }}
+                        </router-link>
+                      </div>
+                      <div class="text-caption">{{ d.label }} {{ formatDate(d.date) }}</div>
+                    </div>
+                    <v-chip :color="expiryColor(d.date)" size="x-small" variant="flat" class="flex-shrink-0">
+                      {{ daysLabel(d.date) }}
+                    </v-chip>
+                  </div>
+                </div>
+              </v-expand-transition>
             </v-sheet>
           </v-col>
         </v-row>
@@ -75,7 +112,7 @@
 
     <v-row>
       <v-col cols="12" sm="6" md="3">
-        <v-card color="primary" theme="dark">
+        <v-card color="primary" theme="dark" to="/insurances" link>
           <v-skeleton-loader v-if="initialLoading" type="list-item" color="primary" theme="dark" />
           <v-card-text v-else>
             <div class="text-overline">Aktive Versicherungen</div>
@@ -95,7 +132,12 @@
         </v-card>
       </v-col>
       <v-col cols="12" sm="6" md="3">
-        <v-card color="warning" theme="dark">
+        <v-card
+          color="warning"
+          theme="dark"
+          :to="upcomingItems[0] ? `/insurances/${upcomingItems[0].id}` : '/calendar'"
+          link
+        >
           <v-skeleton-loader v-if="initialLoading" type="list-item" color="warning" theme="dark" />
           <v-card-text v-else>
             <div class="text-overline">Nächster Ablauf</div>
@@ -104,7 +146,7 @@
         </v-card>
       </v-col>
       <v-col cols="12" sm="6" md="3">
-        <v-card color="success" theme="dark">
+        <v-card color="success" theme="dark" to="/products" link>
           <v-skeleton-loader v-if="initialLoading" type="list-item" color="success" theme="dark" />
           <v-card-text v-else>
             <div class="text-overline">Garantien aktiv</div>
@@ -183,17 +225,13 @@
           </v-card-title>
           <v-card-text>
             <v-list v-if="upcomingItems.length" lines="two">
-              <v-list-item v-for="item in upcomingItems" :key="item.id">
+              <v-list-item v-for="item in upcomingItems" :key="item.id" :to="`/insurances/${item.id}`" link>
                 <template #prepend>
                   <v-avatar color="primary" variant="tonal">
                     <v-icon :icon="categoryIcon(item.kategorie)" />
                   </v-avatar>
                 </template>
-                <v-list-item-title>
-                  <router-link :to="`/insurances/${item.id}`" class="text-decoration-none text-primary">
-                    {{ item.name }}
-                  </router-link>
-                </v-list-item-title>
+                <v-list-item-title class="text-primary">{{ item.name }}</v-list-item-title>
                 <v-list-item-subtitle>
                   {{ item.versicherer }} · endet am {{ formatDate(item.end_date) }}
                 </v-list-item-subtitle>
@@ -223,13 +261,13 @@
           </v-card-title>
           <v-card-text>
             <v-list v-if="cancellationItems.length" lines="two">
-              <v-list-item v-for="item in cancellationItems" :key="item.id">
+              <v-list-item v-for="item in cancellationItems" :key="item.id" :to="`/insurances/${item.id}`" link>
                 <template #prepend>
                   <v-avatar color="warning" variant="tonal">
                     <v-icon icon="mdi-calendar-remove" />
                   </v-avatar>
                 </template>
-                <v-list-item-title>{{ item.name }}</v-list-item-title>
+                <v-list-item-title class="text-primary">{{ item.name }}</v-list-item-title>
                 <v-list-item-subtitle>
                   kündbar bis {{ formatDate(item.deadline) }}<template v-if="item.wirksamZum">
                     · endet dann {{ formatDate(item.wirksamZum) }}</template>
@@ -267,6 +305,7 @@ import {
   formatDate,
   daysUntil,
   getCancellationInfo,
+  parseDateValue,
   productQualityIssues,
   qualityIssues,
   yearlyPremium,
@@ -418,6 +457,27 @@ const upcomingExpiries = computed(() => sortedExpiries.value.filter((item) => {
   const days = daysUntil(item.end_date)
   return days != null && days >= 0 && days <= 90
 }))
+
+// Ausklappbare Detail-Liste zur 90-Tage-Kachel: alle Fristen einzeln, mit Link zum Vertrag
+const deadlineDetailsOpen = ref(false)
+const upcomingDeadlines = computed(() =>
+  [
+    ...upcomingExpiries.value.map((item) => ({
+      key: `end-${item.id}`,
+      id: item.id,
+      name: item.name,
+      date: item.end_date,
+      label: 'endet am',
+    })),
+    ...upcomingCancellations.value.map((item) => ({
+      key: `cancel-${item.id}`,
+      id: item.id,
+      name: item.name,
+      date: item.deadline,
+      label: 'kündbar bis',
+    })),
+  ].sort((a, b) => parseDateValue(a.date) - parseDateValue(b.date))
+)
 const nextExpiryLabel = computed(() =>
   upcomingItems.value[0] ? formatDate(upcomingItems.value[0].end_date) : '–'
 )

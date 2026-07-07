@@ -27,6 +27,7 @@ from app.schemas.schemas import (
     RecommendationRead,
 )
 from app.services import embedding_service, recommendation_service, storage_service
+from app.services.pushover_service import notify_failure
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -61,10 +62,20 @@ async def _embed_document_task(
             log.info("Kein Volltext extrahierbar für Dokument %d", document_id)
     except Exception:  # noqa: BLE001
         log.warning("Volltext-Extraktion fehlgeschlagen (doc=%d) — nur Metadaten eingebettet", document_id)
+        await notify_failure(
+            "⚠ Volltext-Extraktion fehlgeschlagen",
+            f"„{Path(stored_path).name}“ wurde nur mit den Vertrags-Metadaten indiziert — "
+            "der Dokumentinhalt ist im Chat nicht durchsuchbar. Dokument ggf. erneut hochladen.",
+        )
     try:
         await embedding_service.embed_and_store(insurance_id, document_id, rag_text)
     except Exception:  # noqa: BLE001
         log.exception("Embedding fehlgeschlagen für Dokument %d", document_id)
+        await notify_failure(
+            "⚠ Dokument nicht im Suchindex",
+            f"Die Indizierung von „{Path(stored_path).name}“ ist fehlgeschlagen — das Dokument "
+            "ist im Chat nicht auffindbar. Reparatur: Chat-Seite → „Suchindex prüfen“.",
+        )
 
 
 @router.post("/classify", response_model=DocumentClassification)

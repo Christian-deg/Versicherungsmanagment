@@ -168,22 +168,30 @@ export function parseRecurringDate(value) {
  *              (z.B. bis 30.09. → endet 31.12. im selben Jahr;
  *               bis 30.11. → endet 01.01. im Folgejahr)
  */
+// Ungültige Kombinationen (29.02. in Nicht-Schaltjahren) werden wie im Backend
+// (next_recurring_date, monthrange) auf den letzten Tag des Monats geklemmt —
+// sonst rollt new Date() auf den 01.03. und Anzeige und Erinnerung widersprechen sich.
+const clampedYearlyDate = (year, monat, tag) => {
+  const lastDay = new Date(year, monat, 0).getDate()
+  return new Date(year, monat - 1, Math.min(tag, lastDay))
+}
+
 export function getCancellationInfo(item) {
   if (!item.kuendigung_bis_tag || !item.kuendigung_bis_monat) return null
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
-  let deadline = new Date(today.getFullYear(), item.kuendigung_bis_monat - 1, item.kuendigung_bis_tag)
+  let deadline = clampedYearlyDate(today.getFullYear(), item.kuendigung_bis_monat, item.kuendigung_bis_tag)
   if (deadline < today) {
-    deadline = new Date(today.getFullYear() + 1, item.kuendigung_bis_monat - 1, item.kuendigung_bis_tag)
+    deadline = clampedYearlyDate(today.getFullYear() + 1, item.kuendigung_bis_monat, item.kuendigung_bis_tag)
   }
 
   let wirksamZum = null
   if (item.kuendigung_zum_tag && item.kuendigung_zum_monat) {
-    wirksamZum = new Date(deadline.getFullYear(), item.kuendigung_zum_monat - 1, item.kuendigung_zum_tag)
+    wirksamZum = clampedYearlyDate(deadline.getFullYear(), item.kuendigung_zum_monat, item.kuendigung_zum_tag)
     if (wirksamZum <= deadline) {
-      wirksamZum.setFullYear(wirksamZum.getFullYear() + 1)
+      wirksamZum = clampedYearlyDate(deadline.getFullYear() + 1, item.kuendigung_zum_monat, item.kuendigung_zum_tag)
     }
   }
 

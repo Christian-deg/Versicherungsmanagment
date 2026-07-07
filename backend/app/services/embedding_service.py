@@ -23,6 +23,7 @@ import numpy as np
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.services import pushover_service
 
 if TYPE_CHECKING:
     from app.models.models import Insurance
@@ -269,6 +270,12 @@ async def refresh_insurance_metadata(insurance_id: int, documents: list[tuple[in
             await embed_and_store(insurance_id, doc_id, new_text)
         except Exception:  # noqa: BLE001
             log.exception("Metadaten-Refresh fehlgeschlagen für Dokument %d", doc_id)
+            await pushover_service.notify_failure(
+                "⚠ Suchindex nicht aktualisiert",
+                f"Der Metadaten-Refresh für Dokument {doc_id} ist fehlgeschlagen — der Chat "
+                "nutzt für dieses Dokument noch die alten Vertragsdaten. "
+                "Reparatur: Vertrag erneut speichern.",
+            )
 
 
 # Statischer OCR-Prompt — außerhalb der Funktion für Prompt-Caching (LLM01)

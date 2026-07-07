@@ -277,3 +277,36 @@ async def test_send_due_sends_today_and_marks_sent(mocker) -> None:
 
     # 7-Tage-Frist → Hochpriorität (priority=1)
     assert any(priority == 1 for *_, priority in sent)
+
+
+async def test_notify_failure_verschluckt_pushover_fehler(mocker) -> None:
+    """notify_failure darf nie raisen — auch ohne Pushover-Konfiguration."""
+    from app.config import settings
+    from app.services import pushover_service
+
+    mocker.patch.object(settings, "pushover_user_key", "")
+    mocker.patch.object(settings, "pushover_app_token", "")
+    await pushover_service.notify_failure("Titel", "Nachricht")
+
+
+async def test_embed_task_meldet_fehlschlag_per_push(mocker) -> None:
+    """Schlägt das Embedding im Hintergrund fehl, geht eine Störungsmeldung raus."""
+    from app.api import documents as documents_api
+
+    mocker.patch.object(
+        documents_api.storage_service, "extract_document_text", return_value="Volltext"
+    )
+    mocker.patch.object(
+        documents_api.embedding_service, "embed_and_store", side_effect=RuntimeError("boom")
+    )
+    pushes: list[str] = []
+
+    async def _fake_notify(title: str, message: str) -> None:
+        pushes.append(title)
+
+    mocker.patch.object(documents_api, "notify_failure", _fake_notify)
+
+    # Der fail-safe Hintergrund-Task darf trotz Fehler nicht raisen
+    await documents_api._embed_document_task(1, 42, "Metadaten", "C:/ablage/police.pdf")
+
+    assert pushes == ["⚠ Dokument nicht im Suchindex"]

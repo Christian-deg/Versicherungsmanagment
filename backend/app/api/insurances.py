@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -12,7 +11,7 @@ from app.models.database import get_db
 from app.models.enums import INTERVALS_PER_YEAR
 from app.models.models import Insurance, PremiumHistory, Product
 from app.schemas.schemas import InsuranceCreate, InsuranceRead, PremiumHistoryRead
-from app.services import embedding_service
+from app.services import embedding_service, storage_service
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -123,22 +122,9 @@ def delete(insurance_id: int, db: Session = Depends(get_db)) -> None:
     if not obj:
         raise HTTPException(status_code=404, detail="Versicherung nicht gefunden")
 
-    # Dateien und RAG-Embeddings der zugehörigen Dokumente mit entfernen,
-    # sonst bleiben gelöschte Verträge im Chat (Vektorindex) abrufbar.
-    base = settings.documents_dir.resolve()
-    for doc in obj.documents:
-        try:
-            path = Path(doc.stored_path).resolve()
-            if path.is_relative_to(base):
-                path.unlink(missing_ok=True)
-        except OSError as e:
-            log.warning("Dokumentdatei konnte nicht gelöscht werden (doc=%d): %s", doc.id, e)
-        try:
-            embedding_service.delete_for_document(doc.id)
-        except Exception as e:  # noqa: BLE001
-            log.warning("Embeddings konnten nicht gelöscht werden (doc=%d): %s", doc.id, e)
+    docs = [(doc.id, doc.stored_path) for doc in obj.documents]
 
-    # Produkt-Verknüpfungen lösen (SQLite erzwingt den FK nicht)
+    # Produkt-Verknüpfungen lösen — foreign_keys=ON würde das Löschen sonst am FK scheitern lassen
     db.query(Product).filter(Product.linked_insurance_id == insurance_id).update(
         {Product.linked_insurance_id: None}
     )
@@ -146,3 +132,13 @@ def delete(insurance_id: int, db: Session = Depends(get_db)) -> None:
     db.query(PremiumHistory).filter(PremiumHistory.insurance_id == insurance_id).delete()
     db.delete(obj)
     db.commit()
+
+    # Dateien und RAG-Embeddings erst nach dem Commit entfernen (sonst Einträge ohne
+    # Datei bei Commit-Fehler) — ohne diesen Schritt blieben gelöschte Verträge im
+    # Chat (Vektorindex) abrufbar.
+    for doc_id, stored_path in docs:
+        storage_service.delete_stored_file(stored_path, settings.documents_dir)
+        try:
+            embedding_service.delete_for_document(doc_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Embeddings konnten nicht gelöscht werden (doc=%d): %s", doc_id, e)

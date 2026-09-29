@@ -487,12 +487,6 @@ function shareLabel(item) {
   return label
 }
 
-const canSave = computed(() => Boolean(
-  editing.value.name &&
-  editing.value.kategorie &&
-  editing.value.versicherer &&
-  editing.value.vertragsnummer
-))
 // IDs aller Versicherungen, die mindestens ein Dokument haben (für den Datenqualitäts-Check)
 const insuranceIdsWithDocs = ref(new Set())
 // Prämienverlauf je Versicherung (für den Trend-Chip)

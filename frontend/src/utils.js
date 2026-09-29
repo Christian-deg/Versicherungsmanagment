@@ -1,5 +1,30 @@
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useTheme } from 'vuetify'
 import { intervalsPerYear } from './constants'
+
+/**
+ * Basis-Optionen, die ApexCharts an das aktive Vuetify-Theme koppeln.
+ * ApexCharts kennt das Theme nicht: ohne diese Werte rendern Legende, Achsen
+ * und Tooltips im Dark Mode in dunklem Grau auf dunklem Grund.
+ * In der View mit den eigenen Optionen mischen — verschachtelte Schlüssel
+ * (`chart`, `legend`, …) dabei explizit zusammenführen, nicht überschreiben.
+ */
+export function useChartTheme() {
+  const theme = useTheme()
+  return computed(() => {
+    const dark = theme.global.current.value.dark
+    const foreground = dark ? '#e0e0e0' : '#424242'
+    return {
+      theme: { mode: dark ? 'dark' : 'light' },
+      // Ohne 'transparent' malt ApexCharts im Dark Mode einen eigenen
+      // schwarzen Kasten in die Karte
+      chart: { background: 'transparent', foreColor: foreground },
+      legend: { labels: { colors: foreground } },
+      tooltip: { theme: dark ? 'dark' : 'light' },
+      grid: { borderColor: dark ? '#424242' : '#e0e0e0' },
+    }
+  })
+}
 
 /**
  * Ref, deren Wert in localStorage überlebt (z.B. Statusfilter je Ansicht).
@@ -34,6 +59,11 @@ export const parseDateValue = (value) => {
   return new Date(value)
 }
 
+// Date → 'YYYY-MM-DD' in lokaler Zeit. toISOString() rechnet in UTC um und
+// verschiebt das Datum an Sommerzeit-Grenzen um einen Tag.
+export const toIsoDate = (date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+
 export const formatCurrency = (value) =>
   value == null
     ? '–'
@@ -42,13 +72,24 @@ export const formatCurrency = (value) =>
 export const formatDate = (value) =>
   value ? new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium' }).format(parseDateValue(value)) : '–'
 
+// Für HTML-Strings in ApexCharts-Custom-Tooltips (Namen sind Nutzereingaben)
+export function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
 export const daysUntil = (value) => {
   if (!value) return null
   const targetDate = parseDateValue(value)
   const today = new Date()
   targetDate.setHours(0, 0, 0, 0)
   today.setHours(0, 0, 0, 0)
-  return Math.ceil((targetDate.getTime() - today.getTime()) / 86400000)
+  // round statt ceil: an DST-Grenzen sind Tage 23/25 h lang — ceil würde dort einen Tag zu viel zählen
+  return Math.round((targetDate.getTime() - today.getTime()) / 86400000)
 }
 
 export const expiryColor = (value) => {
@@ -137,6 +178,55 @@ export function productQualityIssues(product, hasInvoices = true) {
     issues.push('Kein Kaufdatum hinterlegt')
   }
   return issues
+}
+
+/**
+ * Gesetzliche Gewährleistung in Deutschland. Dient als Annahme, wenn am Produkt
+ * kein Garantieende gepflegt ist — sonst zählte jedes Produkt ohne Datum
+ * fälschlich als "keine Garantie".
+ */
+export const ASSUMED_WARRANTY_YEARS = 2
+
+/**
+ * Effektives Garantieende: eigenes Datum, ersatzweise Kaufdatum + 2 Jahre
+ * (Annahme), und das Ende einer verknüpften Geräteversicherung, falls es
+ * später liegt. Null, wenn es keinerlei Anhaltspunkt gibt.
+ *
+ * Bewusst nur für Auswertungen gedacht: Erinnerungen und die Garantie-Ampel
+ * laufen weiter über das tatsächlich hinterlegte Datum im Backend.
+ */
+export function effectiveWarrantyEnd(product, linkedInsurance = null) {
+  if (!product) return null
+  let end = parseDateValue(product.warranty_end)
+  if (!end) {
+    const purchase = parseDateValue(product.purchase_date)
+    if (purchase) {
+      end = new Date(
+        purchase.getFullYear() + ASSUMED_WARRANTY_YEARS,
+        purchase.getMonth(),
+        purchase.getDate()
+      )
+    }
+  }
+  const insuranceEnd = parseDateValue(linkedInsurance?.end_date)
+  if (insuranceEnd && (!end || insuranceEnd > end)) end = insuranceEnd
+  return end
+}
+
+/** Steht das Produkt heute noch unter Garantie? */
+export function hasActiveWarranty(product, linkedInsurance = null) {
+  const end = effectiveWarrantyEnd(product, linkedInsurance)
+  if (!end) return false
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return end >= today
+}
+
+/** Beruht das Garantieende nur auf der 2-Jahres-Annahme? */
+export function isWarrantyAssumed(product, linkedInsurance = null) {
+  return Boolean(
+    product && !product.warranty_end && !linkedInsurance?.end_date && product.purchase_date
+  )
 }
 
 const MAX_TAG_IM_MONAT = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]

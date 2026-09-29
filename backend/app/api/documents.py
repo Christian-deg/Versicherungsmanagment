@@ -26,7 +26,7 @@ from app.schemas.schemas import (
     InsuranceRead,
     RecommendationRead,
 )
-from app.services import embedding_service, recommendation_service, storage_service
+from app.services import embedding_service, ki_fehler, recommendation_service, storage_service
 from app.services.pushover_service import notify_failure
 
 log = logging.getLogger(__name__)
@@ -60,13 +60,20 @@ async def _embed_document_task(
             log.info("Volltext eingebettet (%d Zeichen) für Dokument %d", len(fulltext), document_id)
         else:
             log.info("Kein Volltext extrahierbar für Dokument %d", document_id)
-    except Exception:  # noqa: BLE001
-        log.warning("Volltext-Extraktion fehlgeschlagen (doc=%d) — nur Metadaten eingebettet", document_id)
-        await notify_failure(
-            "⚠ Volltext-Extraktion fehlgeschlagen",
-            f"„{Path(stored_path).name}“ wurde nur mit den Vertrags-Metadaten indiziert — "
-            "der Dokumentinhalt ist im Chat nicht durchsuchbar. Dokument ggf. erneut hochladen.",
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "Volltext-Extraktion fehlgeschlagen (doc=%d) — nur Metadaten eingebettet",
+            document_id,
+            exc_info=True,
         )
+        if ki_fehler.ist_guthaben_leer(e):
+            await ki_fehler.melde_ki_fehler(e)
+        else:
+            await notify_failure(
+                "⚠ Volltext-Extraktion fehlgeschlagen",
+                f"„{Path(stored_path).name}“ wurde nur mit den Vertrags-Metadaten indiziert — "
+                "der Dokumentinhalt ist im Chat nicht durchsuchbar. Dokument ggf. erneut hochladen.",
+            )
     try:
         await embedding_service.embed_and_store(insurance_id, document_id, rag_text)
     except Exception:  # noqa: BLE001
@@ -171,12 +178,12 @@ async def upload_document(
             detail="Dokument wurde vom Sicherheitsfilter abgelehnt.",
         ) from e
     except Exception as e:
-        # Interne Fehlerdetails nur ins Log — nicht an den Client leaken
+        # Interne Fehlerdetails nur ins Log — ans Frontend nur eine verständliche Meldung
         log.exception("Dokumentenanalyse fehlgeschlagen")
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="KI-Analyse fehlgeschlagen. Details siehe Server-Log.",
+            detail=await ki_fehler.melde_ki_fehler(e),
         ) from e
 
     # Document-Eintrag (noch ohne insurance_id) anlegen
@@ -271,8 +278,8 @@ async def confirm_extraction(
     record_premium(db, ins)  # Startwert für den Prämienverlauf
 
     # Datei in finalen Ordner verschieben
-    src = Path(doc.stored_path)
-    if not src.exists():
+    src = storage_service.resolve_stored_path(doc.stored_path, settings.documents_dir)
+    if src is None or not src.exists():
         raise HTTPException(status_code=410, detail="Quelldatei nicht mehr vorhanden")
     content = await anyio.to_thread.run_sync(src.read_bytes)
     try:
@@ -306,8 +313,8 @@ async def confirm_extraction(
         if extra_doc.insurance_id is not None:
             log.warning("Extra-Dokument %d übersprungen: bereits einer Versicherung zugeordnet", extra_id)
             continue
-        extra_src = Path(extra_doc.stored_path)
-        if not extra_src.exists():
+        extra_src = storage_service.resolve_stored_path(extra_doc.stored_path, settings.documents_dir)
+        if extra_src is None or not extra_src.exists():
             log.warning("Extra-Dokument %d: Quelldatei nicht mehr vorhanden", extra_id)
             continue
         extra_content = await anyio.to_thread.run_sync(extra_src.read_bytes)
@@ -358,8 +365,8 @@ async def assign_document(
     if not ins:
         raise HTTPException(status_code=404, detail="Versicherung nicht gefunden")
 
-    src = Path(doc.stored_path)
-    if not src.exists():
+    src = storage_service.resolve_stored_path(doc.stored_path, settings.documents_dir)
+    if src is None or not src.exists():
         raise HTTPException(status_code=410, detail="Quelldatei nicht mehr vorhanden")
     content = await anyio.to_thread.run_sync(src.read_bytes)
     try:
@@ -500,19 +507,15 @@ def delete_document(document_id: int, db: Session = Depends(get_db)) -> None:
     if not doc:
         raise HTTPException(status_code=404, detail="Dokument nicht gefunden")
 
-    base = settings.documents_dir.resolve()
-    try:
-        path = Path(doc.stored_path).resolve()
-        if path.is_relative_to(base):
-            path.unlink(missing_ok=True)
-    except OSError as e:
-        log.warning("Dokumentdatei konnte nicht gelöscht werden (doc=%d): %s", doc.id, e)
-    try:
-        embedding_service.delete_for_document(doc.id)
-    except Exception as e:  # noqa: BLE001
-        log.warning("Embeddings konnten nicht gelöscht werden (doc=%d): %s", doc.id, e)
+    doc_id, stored_path = doc.id, doc.stored_path
     db.delete(doc)
     db.commit()
+    # Datei und Embeddings erst nach dem Commit entfernen (sonst Eintrag ohne Datei)
+    storage_service.delete_stored_file(stored_path, settings.documents_dir)
+    try:
+        embedding_service.delete_for_document(doc_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Embeddings konnten nicht gelöscht werden (doc=%d): %s", doc_id, e)
 
 
 @router.get("/{insurance_id}/recommendation", response_model=RecommendationRead)
@@ -541,8 +544,8 @@ async def create_recommendation(insurance_id: int, db: Session = Depends(get_db)
         ) from e
     except Exception as e:
         log.exception("Empfehlung fehlgeschlagen")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Empfehlung fehlgeschlagen. Details siehe Server-Log.",
-        ) from e
+        meldung = await ki_fehler.melde_ki_fehler(e)
+        if meldung == ki_fehler.GENERISCHE_MELDUNG:
+            meldung = "Empfehlung fehlgeschlagen. Details siehe Server-Log."
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=meldung) from e
 

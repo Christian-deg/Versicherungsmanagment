@@ -108,6 +108,8 @@ export const invoicesApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     }).then(r => r.data)
   },
+  // Nachträgliche Korrektur: nur mitgeschickte Felder ändern sich (null leert ein Feld)
+  update: (id, data) => api.patch(`/invoices/${id}`, data).then(r => r.data),
   delete: (id, { force = false } = {}) =>
     api.delete(`/invoices/${id}`, { params: force ? { force: true } : {} }),
 }
@@ -115,6 +117,11 @@ export const invoicesApi = {
 export const chatApi = {
   ask: (frage, verlauf = []) =>
     api.post('/chat', { frage, verlauf }, { timeout: 120000 }).then(r => r.data),
+}
+
+export const exportsApi = {
+  // Stand der automatischen täglichen Backups (letztes Backup, Anzahl, letzter Fehler)
+  backupStatus: () => api.get('/exports/backup/status').then(r => r.data),
 }
 
 export const notificationsApi = {

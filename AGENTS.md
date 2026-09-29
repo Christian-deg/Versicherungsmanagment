@@ -25,7 +25,7 @@ PDF/Foto Upload
 [Magic-Bytes-Validierung + UUID-Speicherung]
     │
     ▼
-[DocumentAnalysisAgent (gpt-5.4 Vision)] ◀──▶ [DocumentEvaluator]
+[DocumentAnalysisAgent (Vision)] ◀──▶ [DocumentEvaluator]
     │
     ▼
 [Review-Screen für Nutzer]
@@ -40,7 +40,7 @@ APScheduler (täglich) ──▶ [Pushover-Push aufs Handy]
 Chat-Frage
     │
     ▼
-[QAAgent (gpt-5.4-mini)] ──▶ chromadb_search → 3-5 relevante Chunks
+[QAAgent] ──▶ chromadb_search → 3-5 relevante Chunks
                           ──▶ get_insurance_metadata
     │
     ▼
@@ -49,12 +49,19 @@ Antwort + Quellen
 
 ## Modelle
 
-| Aufgabe | Modell |
-|---|---|
-| Dokumentenanalyse (Vision) | `gpt-5.4` |
-| Q&A / Chat | `gpt-5.4-mini` |
-| Empfehlungen | `gpt-5.4-mini` |
-| Embeddings | `text-embedding-3-small` |
+Drei Stufen, konfigurierbar über `.env` (Stand 09/2026):
+
+| Stufe (`.env`) | Modell | Aufgaben |
+|---|---|---|
+| `MODEL_DOCUMENT` | `gpt-5.6-terra` | Policen-Analyse (Vision), Rechnungsfotos (Vision) |
+| `MODEL_CHAT` | `gpt-5.6-terra` | Q&A-Chat (RAG), Empfehlungen |
+| `MODEL_FAST` | `gpt-5.6-luna` | Klassifizierer, Evaluator, Rechnungs-Textlayer, Vision-OCR |
+| `MODEL_EMBEDDING` | `text-embedding-3-large` (lokal) / `-small` (Default) | Embeddings |
+| `REASONING_EFFORT` | `low` | Reasoning-Aufwand aller gpt-5.x-Aufrufe |
+
+Wechsel des Embedding-Modells macht den Vektorindex ungültig (andere Dimension) →
+`data/vectordb` leeren, danach Chat-Seite → „Suchindex prüfen“.
+Nach jedem Modellwechsel: Smoke-Test (`python -m app.smoke_test`, siehe CLAUDE.md).
 
 ## Erlaubte Kategorien (Allowlist)
 
@@ -66,11 +73,18 @@ Unfall, Rechtsschutz, Leben, Reise, Tier, Geräteversicherung, Sonstige
 ## Agenten
 
 Alle Agenten folgen den Regeln aus `.claude/skills/agentic-systems/SKILL.md`:
-- `max_tokens` explizit gesetzt. **Hinweis:** Die Modelle `gpt-5.4`/`gpt-5.5`
-  unterstützen den `temperature`-Parameter nicht mehr — er darf NICHT gesetzt
-  werden (führt sonst zu fehlgeschlagenen API-Aufrufen). Determinismus kommt
-  über `output_type` + strikte System-Prompts, nicht über `temperature`.
-- Pydantic `output_type` zwingend
+- `ModelSettings` immer über `app/agents/model_config.model_settings(model, max_tokens)`:
+  - **Kein `temperature`** — gpt-5.x lehnt es ab (fehlgeschlagene API-Aufrufe).
+    Determinismus kommt über `output_type` + strikte System-Prompts.
+  - **Reasoning explizit** (`REASONING_EFFORT`): Reasoning-Tokens zählen gegen
+    `max_tokens`; der Server-Default ist je Modell verschieden (gpt-5.6: medium).
+  - **`max_tokens` mit Luft** (≥ 1000, Vision/Tools 2000–4000): ein abgeschnittenes
+    JSON verwirft den GESAMTEN Output.
+  - Direkte Chat-Completions: `chat_completion_limits()` (`max_completion_tokens`).
+- Pydantic `output_type` zwingend; Freitextfelder per `field_validator(mode="before")`
+  kürzen statt verwerfen
+- **KI-Fehler nie verschlucken:** Endpoints liefern 502 mit
+  `ki_fehler.melde_ki_fehler(e)` (z. B. „Guthaben aufgebraucht“ + Push), Logs mit Traceback
 - Input-/Output-Guardrails (Allowlist + Sensitive-Info-Check auf Freitext-Feldern)
 - Nutzerdaten als separater `<eingabe>`-Block, nie im System-Prompt
 - Keine Secrets im LLM-Kontext
@@ -80,12 +94,12 @@ Alle Agenten folgen den Regeln aus `.claude/skills/agentic-systems/SKILL.md`:
 
 | | |
 |---|---|
-| **Modell** | `gpt-5.4` (Vision) |
+| **Modell** | `MODEL_DOCUMENT` (Vision) |
 | **Aufgabe** | Versicherungsdaten aus PDF-Seiten/Fotos extrahieren |
 | **Tools** | keine (reine Vision-Analyse) |
 | **Input** | Image-Bytes + Original-Dateiname |
 | **Output** | `VersicherungsExtraktion` |
-| **Evaluator** | Eigener gpt-5.4-mini-Agent prüft fachlich, max. 3 Retries |
+| **Evaluator** | Eigener `MODEL_FAST`-Agent prüft fachlich, max. 3 Retries |
 
 ```python
 class VersicherungsExtraktion(BaseModel):
@@ -104,9 +118,9 @@ class VersicherungsExtraktion(BaseModel):
 
 | | |
 |---|---|
-| **Modell** | `gpt-5.4-mini` |
-| **Aufgabe** | Fragen zu gespeicherten Versicherungen beantworten |
-| **Tools** | `chromadb_search(frage)`, `get_insurance_metadata(id)`, `list_insurances()`, `web_search(query)` |
+| **Modell** | `MODEL_CHAT` |
+| **Aufgabe** | Fragen zu Versicherungen, Produkten/Garantien und Rechnungen beantworten |
+| **Tools** | `chromadb_search(frage)`, `get_insurance_metadata(id)`, `list_insurances()`, `list_products()`, `web_search(query)` |
 | **Input** | Nutzerfrage als Text (optional mit Gesprächsverlauf) |
 | **Output** | `ChatAntwort` |
 
@@ -121,7 +135,7 @@ class ChatAntwort(BaseModel):
 
 | | |
 |---|---|
-| **Modell** | `gpt-5.4-mini` |
+| **Modell** | `MODEL_CHAT` |
 | **Aufgabe** | Versicherungen ganzheitlich bewerten (Preis + Deckung) |
 | **Tools** | `get_reference_values(kategorie)`, `get_versicherung_details(id)`, `web_search(query)` |
 | **Output** | `Empfehlung` |
@@ -133,7 +147,27 @@ class Empfehlung(BaseModel):
     details: str = Field(..., max_length=1000)
 ```
 
-### 4. `NotificationService` (kein LLM)
+### 4. `InvoiceAnalysisAgent` (Rechnungen/Kaufbelege)
+
+| | |
+|---|---|
+| **Modell** | Textlayer: `MODEL_FAST` · Vision: `MODEL_DOCUMENT` |
+| **Aufgabe** | Kaufdatum, Betrag, Produktname, Garantiedauer aus Belegen extrahieren |
+| **Ablauf** | PDF-Textlayer zuerst; liefert er weder Kaufdatum noch Betrag (Scanner-PDF) oder scheitert er → Vision; Ergebnisse werden zusammengeführt |
+| **Output** | `InvoiceExtraction` (alle Felder optional) → Review-Dialog im Frontend |
+| **Fehler** | Dauerhafte API-Fehler (Guthaben, Key, Modell) → 502 mit Klartext, kein Vision-Versuch |
+
+Beim Speichern wird ein fehlendes Produkt-Kaufdatum aus der Rechnung übernommen.
+
+### 5. `DocumentClassifier`
+
+| | |
+|---|---|
+| **Modell** | `MODEL_FAST` (Textlayer, sonst Vision mit erster Seite) |
+| **Aufgabe** | Upload als `versicherung` / `rechnung` / `unbekannt` einordnen |
+| **Fehler** | Fail-open zu `unbekannt` (Nutzer wählt selbst), Fehler aber mit Traceback im Log |
+
+### 6. `NotificationService` (kein LLM)
 
 Reiner Python-Service, kein Agent. Wird täglich via APScheduler ausgelöst.
 
@@ -203,4 +237,11 @@ PUSHOVER_USER_KEY=...
 PUSHOVER_APP_TOKEN=...
 DATA_DIR=/app/data
 LOG_LEVEL=INFO
+MODEL_DOCUMENT=gpt-5.6-terra
+MODEL_CHAT=gpt-5.6-terra
+MODEL_FAST=gpt-5.6-luna
+MODEL_EMBEDDING=text-embedding-3-large
+REASONING_EFFORT=low
+SEARCH_PROVIDER=serper
+SEARCH_API_KEY=...
 ```

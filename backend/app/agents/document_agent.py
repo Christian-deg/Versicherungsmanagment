@@ -1,25 +1,27 @@
 """DocumentAnalysisAgent + Evaluator (siehe SKILL.md Abschnitt 1-5)."""
 from __future__ import annotations
 
-import base64
 import logging
 from datetime import date
 from typing import Any
 
-from agents import Agent, GuardrailFunctionOutput, InputGuardrail, ModelSettings, OutputGuardrail, Runner
-from pydantic import BaseModel, Field
+from agents import Agent, GuardrailFunctionOutput, InputGuardrail, OutputGuardrail, Runner
+from pydantic import BaseModel, Field, field_validator
 
 from app.agents.guardrails import (
     GuardrailResult,
     check_freetext_fields,
     injection_input_guardrail,
 )
+from app.agents.model_config import model_settings
 from app.config import settings
 from app.models.enums import Confidence, Kategorie, Zahlungsintervall
+from app.services.storage_service import image_data_url
 
 log = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
+_HINWEISE_MAX = 500
 
 
 class VersicherungsExtraktion(BaseModel):
@@ -53,13 +55,24 @@ class VersicherungsExtraktion(BaseModel):
         description="Monat (1-12), zu dem der Vertrag nach Kündigung endet. Null wenn nicht erkennbar.",
     )
     konfidenz: Confidence = Field(..., description="Gesamt-Konfidenz der Extraktion")
-    hinweise: str = Field(..., max_length=500, description="Freitext-Hinweise zur Extraktion")
+    hinweise: str = Field(..., max_length=_HINWEISE_MAX, description="Freitext-Hinweise zur Extraktion")
+
+    @field_validator("hinweise", mode="before")
+    @classmethod
+    def _hinweise_kuerzen(cls, v: object) -> object:
+        """Zu lange Hinweise kürzen, statt die gesamte Extraktion scheitern zu lassen."""
+        return v.strip()[:_HINWEISE_MAX] if isinstance(v, str) else v
 
 
 class Bewertung(BaseModel):
     bestanden: bool
     grund: str = Field(..., max_length=300)
     verbesserungshinweis: str | None = Field(None, max_length=300)
+
+    @field_validator("grund", "verbesserungshinweis", mode="before")
+    @classmethod
+    def _kuerzen(cls, v: object) -> object:
+        return v.strip()[:300] if isinstance(v, str) else v
 
 
 # ---------- Output-Guardrail (Allowlist + Sensitive-Info) ----------
@@ -154,11 +167,12 @@ Versicherer oder subjektive Vollständigkeit. Antworte mit einer strukturierten 
 
 # ---------- Agenten ----------
 
+# Token-Limits umfassen auch Reasoning-Tokens (siehe model_config) — mit Luft bemessen
 document_agent = Agent(
     name="document-analysis",
     instructions=EXTRACTION_PROMPT,
     model=settings.model_document,
-    model_settings=ModelSettings(max_tokens=1200),
+    model_settings=model_settings(settings.model_document, 4000),
     output_type=VersicherungsExtraktion,
     input_guardrails=[],  # Vision-Input → Pattern-Check entfällt; Bilder sind kein Text
     output_guardrails=[OutputGuardrail(guardrail_function=extraction_output_guardrail)],
@@ -167,8 +181,8 @@ document_agent = Agent(
 document_evaluator = Agent(
     name="document-analysis-evaluator",
     instructions=EVALUATOR_PROMPT,
-    model=settings.model_chat,  # mini reicht
-    model_settings=ModelSettings(max_tokens=300),
+    model=settings.model_fast,  # reine JSON-Plausibilitätsprüfung — kleines Modell reicht
+    model_settings=model_settings(settings.model_fast, 1000),
     output_type=Bewertung,
     input_guardrails=[InputGuardrail(guardrail_function=injection_input_guardrail)],
 )
@@ -188,18 +202,18 @@ def _sanitize_filename(filename: str) -> str:
     return safe or "dokument"
 
 
-def _build_vision_input(images_b64: list[str], filename: str) -> list[dict[str, Any]]:
+def _build_vision_input(image_urls: list[str], filename: str) -> list[dict[str, Any]]:
     """Baut den Vision-Input für die Responses-API. Statischer Header + dynamischer Block.
 
-    images_b64: vorab Base64-kodierte PNG-Seiten (einmal kodieren, nicht je Retry).
+    image_urls: vorab erzeugte Data-URLs (einmal kodieren, nicht je Retry).
     """
     # LLM01: Dateinamen sanitieren — er landet als Text im Modell-Kontext
     safe_filename = _sanitize_filename(filename)
     content: list[dict[str, Any]] = [
         {"type": "input_text", "text": f"<dokument name='{safe_filename}'>"}
     ]
-    for b64 in images_b64:
-        content.append({"type": "input_image", "image_url": f"data:image/png;base64,{b64}"})
+    for url in image_urls:
+        content.append({"type": "input_image", "image_url": url})
     content.append({"type": "input_text", "text": "</dokument>"})
     return [{"role": "user", "content": content}]
 
@@ -212,12 +226,12 @@ async def analyze_document(images_png: list[bytes], filename: str) -> Versicheru
     if not images_png:
         raise ValueError("Keine Bilder zur Analyse übergeben")
 
-    images_b64 = [base64.b64encode(img).decode("ascii") for img in images_png]
+    image_urls = [image_data_url(img) for img in images_png]
     last_eval: Bewertung | None = None
     last_result: VersicherungsExtraktion | None = None
 
     for attempt in range(1, MAX_RETRIES + 1):
-        vision_input = _build_vision_input(images_b64, filename)
+        vision_input = _build_vision_input(image_urls, filename)
 
         # Retry-Feedback als zusätzlicher User-Block (nicht in System-Prompt mischen)
         if last_eval and not last_eval.bestanden:

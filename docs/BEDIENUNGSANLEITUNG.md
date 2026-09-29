@@ -98,9 +98,14 @@ Hier siehst du:
 - die nächsten **Kündigungsfristen** („kündbar bis") — damit du rechtzeitig
   kündigen oder wechseln kannst
 
-Über den **Backup**-Button lädst du eine komplette Datensicherung als
-ZIP-Datei herunter (Datenbank + alle Dokumente und Belege) — ideal, um sie
-regelmäßig auf eine externe Platte oder in einen Cloud-Speicher zu legen.
+Die App sichert sich **jede Nacht automatisch** (Datenbank + alle Dokumente und
+Rechnungen) in den Ordner `backups/`. Wann das letzte automatische Backup lief,
+zeigt der Tooltip am **Backup**-Button; schlägt eine Sicherung fehl, erscheint
+oben im Dashboard eine rote Warnung (und eine Push-Nachricht).
+
+Über den **Backup**-Button lädst du zusätzlich jederzeit eine komplette
+Datensicherung als ZIP-Datei herunter — ideal, um sie auf eine externe Platte
+oder in einen Cloud-Speicher zu legen.
 
 Typische Nutzung:
 - Prüfen, ob bald Verträge auslaufen
@@ -237,7 +242,7 @@ springst du direkt in den Assistenten — mit vorbefülltem Bezug zum Vertrag
 #### Verträge Personen zuordnen (Familie)
 
 Im Bearbeiten-Formular gibt es das Feld **„Gehört zu"** — ein freies Label wie
-„Christian" oder „Anna" (kein Login, nur eine Beschriftung). Sobald Labels
+„Anna" oder „Max" (kein Login, nur eine Beschriftung). Sobald Labels
 vergeben sind:
 - erscheinen sie als **Filter-Chips** über der Vertragsliste
 - steht die Person als Chip am Vertrag

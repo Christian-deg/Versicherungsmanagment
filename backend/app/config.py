@@ -10,11 +10,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # OpenAI
+    # OpenAI — drei Modell-Stufen (siehe AGENTS.md "Modelle"):
+    # document = Vision-Extraktion (Policen, Belegfotos), chat = Chat/RAG + Empfehlungen,
+    # fast = kleine Hilfsaufgaben (Klassifizierung, Evaluator, Beleg-Textlayer, OCR)
     openai_api_key: str = ""
-    model_document: str = "gpt-5.4"
-    model_chat: str = "gpt-5.4-mini"
+    model_document: str = "gpt-5.6-terra"
+    model_chat: str = "gpt-5.6-terra"
+    model_fast: str = "gpt-5.6-luna"
+    # Achtung: Wechsel des Embedding-Modells macht den Vektorindex ungültig
+    # (andere Dimension) → danach data/vectordb leeren und neu indizieren
     model_embedding: str = "text-embedding-3-small"
+    # Reasoning-Aufwand für Reasoning-Modelle (gpt-5.x, o-Serie). Explizit gesetzt,
+    # weil der Server-Default je Modell verschieden ist (gpt-5.4-mini: none,
+    # gpt-5.6-*: medium) und Reasoning-Tokens gegen das Token-Limit zählen.
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] = "low"
 
     # Web-Suche (RecommendationAgent) — ungültiger Wert schlägt beim Start fehl
     search_provider: Literal["serper", "brave"] = "serper"
@@ -28,6 +37,9 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     max_upload_bytes: int = 80 * 1024 * 1024  # 80 MB (Versicherungsdokumente — oft viele Seiten)
     max_invoice_upload_bytes: int = 10 * 1024 * 1024  # 10 MB (Rechnungen/Belege)
+    # Automatische Backups — bewusst außerhalb von data_dir: Docker mountet den
+    # Ordner separat (BACKUP_HOST_DIR), idealerweise auf ein anderes Laufwerk/NAS
+    backup_dir: Path = Path("./backups")
 
     # Logging
     log_level: str = "INFO"

@@ -57,7 +57,8 @@ via Pushover.
 - 👥 **Personen-Zuordnung**: „gehört zu"-Label je Vertrag mit Filter und Kosten je Person —
   Familien-Übersicht ohne Benutzerverwaltung
 - 📉 **Kostenentwicklung**: Gesamt-Jahresprämie im Zeitverlauf auf dem Dashboard
-- 💾 **Backup per Klick**: Komplett-Sicherung (Datenbank + Dokumente + Belege) als ZIP
+- 💾 **Automatische Backups**: tägliche, geprüfte Komplett-Sicherung (Datenbank + Dokumente + Belege)
+  mit 7 Tages- und 12 Monatsständen, Push bei Fehlschlag — plus Backup per Klick als ZIP
 - ↩️ **Lösch-Undo**: 5 Sekunden „Rückgängig" nach dem Löschen von Verträgen und Produkten
 - 📷 **Kamera-Aufnahme**: Dokumente und Belege am Handy direkt abfotografieren
 - 🌐 **Web-Suche (optional)**: aktuelle Marktinfos für den Empfehlungs-Agenten via Serper oder Brave
@@ -71,7 +72,7 @@ via Pushover.
 |---|---|
 | Frontend | Vue 3 + Vuetify 3 + Vite |
 | Backend | Python 3.13 + FastAPI |
-| KI | OpenAI Agents SDK (gpt-5.4 / gpt-5.4-mini) |
+| KI | OpenAI Agents SDK (gpt-5.6-terra / gpt-5.6-luna) |
 | Strukturierte DB | SQLite + SQLAlchemy |
 | Vektor-DB | SQLite-Vektorstore (lokal, numpy-Cosine) |
 | Notifications | Pushover API |

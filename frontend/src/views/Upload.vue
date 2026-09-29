@@ -422,6 +422,8 @@ async function assignToExisting(updateFields) {
       await insurancesApi.update(alt.id, {
         name: alt.name,
         kategorie: alt.kategorie,
+        // person mitschicken — fehlt das Feld, setzt das Backend die Zuordnung auf null
+        person: alt.person,
         versicherer: alt.versicherer,
         vertragsnummer: alt.vertragsnummer,
         start_date: preview.value.start_date || alt.start_date,

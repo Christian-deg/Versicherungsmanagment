@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import chat, documents, exports, insurances, invoices, notifications, products
 from app.config import settings
-from app.models.database import init_db
+from app.models.database import checkpoint_wal, engine, init_db
 from app.scheduler.notification_job import start_scheduler, stop_scheduler
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
@@ -23,6 +23,10 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     yield
     stop_scheduler()
+    # WAL zurückschreiben und Pool-Verbindungen schließen — sonst bleibt
+    # insurance.sqlite bis zum nächsten Checkpoint veraltet
+    checkpoint_wal()
+    engine.dispose()
     log.info("Backend beendet")
 
 

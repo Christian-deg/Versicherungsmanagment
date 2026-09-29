@@ -52,6 +52,30 @@ export const categoryIcons = {
 
 export const categoryIcon = (kategorie) => categoryIcons[kategorie] || 'mdi-shield'
 
+// Vorschläge für Produkt-Kategorien (Dropdown). Bereits verwendete Kategorien
+// kommen im ProductCategoryField automatisch dazu; eigene bleiben möglich.
+export const productCategories = [
+  'Audio',
+  'Computer',
+  'Fahrrad',
+  'Filmen',
+  'Fotografieren',
+  'Garten',
+  'Haushaltsgerät',
+  'Konsole & Gaming',
+  'Kühlgerät',
+  'Licht',
+  'Möbel',
+  'Netzwerk',
+  'Rucksack',
+  'Smartphone & Tablet',
+  'TV',
+  'Uhr & Schmuck',
+  'Unterhaltungselektronik',
+  'Werkzeug',
+  'Sonstiges',
+]
+
 // Produkt-Kategorien sind Freitext — Icon per Stichwort-Heuristik
 const productIconRules = [
   [/handy|smartphone|phone|tablet/i, 'mdi-cellphone'],
@@ -90,6 +114,20 @@ export const navItems = [
   { to: '/upload', title: 'Dokument hochladen', icon: 'mdi-cloud-upload', description: 'Police per PDF oder Foto analysieren' },
   { to: '/chat', title: 'Assistent', icon: 'mdi-robot', description: 'Fragen zu deinen Daten stellen' },
 ]
+
+// Achsen-Beschriftung für ApexCharts-Datetime-Achsen: deutsche, numerische
+// Formate statt englischer Monatsnamen — und bei engem Zeitbereich (alle
+// Einträge am selben Tag) das Datum statt Uhrzeiten wie "20:00"
+export const datetimeAxisLabels = {
+  datetimeUTC: false,
+  datetimeFormatter: {
+    year: 'yyyy',
+    month: 'MM.yyyy',
+    day: 'dd.MM.yyyy',
+    hour: 'dd.MM.yyyy',
+    minute: 'dd.MM.yyyy',
+  },
+}
 
 export const chatExampleQuestions = [
   'Wann läuft meine nächste Versicherung ab?',

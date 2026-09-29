@@ -12,8 +12,9 @@ node_modules/
 dist/
 .vite/
 
-# Daten
+# Daten (inkl. automatischer Backups — enthalten alle privaten Dokumente)
 data/
+backups/
 *.sqlite
 *.sqlite-journal
 

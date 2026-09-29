@@ -10,7 +10,6 @@ native Abhängigkeiten aus.
 """
 from __future__ import annotations
 
-import base64
 import logging
 import sqlite3
 from contextlib import closing
@@ -200,15 +199,28 @@ def texts_for_insurance(insurance_id: int, max_chars: int = 4000) -> str:
 
     Liest alle Chunks dieser Versicherung in Dokument-/Chunk-Reihenfolge — ohne
     Embedding-Aufruf, rein aus SQLite. Für die inhaltliche Empfehlungs-Bewertung.
+    Folge-Chunks werden um CHUNK_OVERLAP gekürzt, damit der Agent keine
+    doppelten Textstellen an den Chunk-Grenzen sieht (spart zudem Tokens).
     """
     with closing(_connect()) as conn:
         rows = conn.execute(
-            "SELECT text FROM chunks WHERE insurance_id = ? ORDER BY document_id, chunk_index",
+            "SELECT document_id, text FROM chunks WHERE insurance_id = ? "
+            "ORDER BY document_id, chunk_index",
             (insurance_id,),
         ).fetchall()
     if not rows:
         return ""
-    return "\n".join(r[0] for r in rows)[:max_chars]
+    parts: list[str] = []
+    prev_doc: int | None = None
+    for doc_id, text in rows:
+        if doc_id != prev_doc:
+            if prev_doc is not None:
+                parts.append("\n")
+            parts.append(text)
+            prev_doc = doc_id
+        else:
+            parts.append(text[CHUNK_OVERLAP:])
+    return "".join(parts)[:max_chars]
 
 
 def build_insurance_metadata(ins: Insurance, ai_summary: str | None = None) -> str:
@@ -283,6 +295,8 @@ _OCR_PROMPT = (
     "Transkribiere den gesamten sichtbaren Text dieser Seite vollständig und wortgetreu. "
     "Antworte nur mit dem transkribierten Text, ohne Erläuterungen oder Kommentare."
 )
+# Eine dicht bedruckte Seite hat ~2000-3000 Tokens; dazu kommt ggf. Reasoning
+_OCR_MAX_TOKENS = 8000
 
 
 async def ocr_document_text(stored_path: str) -> str:
@@ -290,10 +304,14 @@ async def ocr_document_text(stored_path: str) -> str:
 
     Wird verwendet wenn kein nativer Textlayer vorhanden ist (gescannte PDFs, Bilder).
     Verarbeitet max. 10 Seiten (durch read_document_image_bytes begrenzt).
-    Je Seite max. 4000 Output-Tokens.
+    Je Seite max. _OCR_MAX_TOKENS Output-Tokens (inkl. Reasoning).
+    Bei dauerhaften Fehlern (Guthaben leer, Key ungültig) wird abgebrochen und
+    der Fehler weitergereicht — der Aufrufer meldet ihn per Push.
     """
     # Lazily importieren um Zirkularität zu vermeiden
-    from app.services.storage_service import StorageError, read_document_image_bytes
+    from app.agents.model_config import chat_completion_limits
+    from app.services import ki_fehler
+    from app.services.storage_service import StorageError, image_data_url, read_document_image_bytes
 
     try:
         # PDF-Rendering ist CPU-lastig — nicht auf dem Event-Loop ausführen
@@ -308,31 +326,36 @@ async def ocr_document_text(stored_path: str) -> str:
     client = _client()
     pages: list[str] = []
     for i, img_bytes in enumerate(images):
-        b64 = base64.b64encode(img_bytes).decode("ascii")
         try:
             resp = await client.chat.completions.create(
-                model=settings.model_chat,
+                model=settings.model_fast,
                 messages=[
                     {
                         "role": "user",
                         "content": [
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{b64}",
-                                    "detail": "high",
-                                },
+                                "image_url": {"url": image_data_url(img_bytes), "detail": "high"},
                             },
                             {"type": "text", "text": _OCR_PROMPT},
                         ],
                     }
                 ],
-                max_tokens=4000,
+                # Reasoning-Modelle lehnen max_tokens ab → max_completion_tokens
+                **chat_completion_limits(settings.model_fast, _OCR_MAX_TOKENS),
             )
             text = (resp.choices[0].message.content or "").strip()
             if text:
                 pages.append(f"[Seite {i + 1}]\n{text}")
-        except Exception:  # noqa: BLE001
-            log.warning("Vision-OCR fehlgeschlagen für Seite %d von '%s'", i + 1, Path(stored_path).name)
+        except Exception as e:  # noqa: BLE001
+            # exc_info: ohne Fehlerdetails ist z.B. ein abgelehnter API-Parameter nicht diagnostizierbar
+            log.warning(
+                "Vision-OCR fehlgeschlagen für Seite %d von '%s'",
+                i + 1,
+                Path(stored_path).name,
+                exc_info=True,
+            )
+            if ki_fehler.ist_dauerhaft(e):
+                raise  # weitere Seiten würden genauso scheitern
 
     return "\n\n".join(pages)

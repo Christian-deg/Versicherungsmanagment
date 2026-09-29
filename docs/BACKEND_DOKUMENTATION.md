@@ -297,7 +297,9 @@ Zuständig für:
 - ICS-Kalender-Feed (`calendar.ics`) mit Abläufen, Garantieenden und jährlich
   wiederkehrenden Kündigungsfristen — zum Abonnieren in Kalender-Apps
 - Komplett-Backup (`backup.zip`): konsistente DB-Kopien (SQLite-Backup-API)
-  plus alle Dokumente/Belege, ZIP_STORED für schnellen Export
+  plus alle Dokumente/Belege, ZIP_STORED für schnellen Export — dieselbe Logik
+  (`services/backup_service.py`) wie das automatische tägliche Backup
+- Backup-Status (`backup/status`): letztes automatisches Backup, Anzahl, letzter Fehler
 
 ## Agenten im Backend
 
@@ -416,8 +418,15 @@ Der Scheduler läuft im Backend-Prozess.
 ### Trigger
 
 - täglich um 08:00 — Notifications berechnen und versenden, verwaiste Uploads bereinigen
+- täglich um 03:30 — Komplett-Backup (`backup_service.create_auto_backup`) nach
+  `BACKUP_DIR`; kurz nach dem Start nachgeholt, wenn das letzte älter als 20 h ist.
+  Aufbewahrung: jüngstes Backup je Tag (7 Tage) und je Monat (12 Monate).
+  Fehler → Pushover + Warnung im Dashboard (`GET /api/exports/backup/status`)
 - wöchentlich (Mo 03:00) — Empfehlungen auffrischen, die älter als ein Jahr sind
-- monatlich (1., 02:00 UTC) — konsistentes SQLite-Backup (3 Monate Aufbewahrung)
+
+`misfire_grace_time` = 6 h: verpasste Läufe (Host im Standby) werden einmalig nachgeholt.
+Nach jedem Backup sowie beim Start/Stopp schreibt `checkpoint_wal()` das SQLite-WAL in
+`insurance.sqlite` zurück.
 
 ### Benachrichtigungslogik
 

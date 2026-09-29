@@ -23,7 +23,7 @@ def _validate_recurring_date(tag: int | None, monat: int | None, feldname: str) 
 class InsuranceBase(BaseModel):
     name: str = Field(..., max_length=200)
     kategorie: Kategorie
-    # "gehört zu": freies Personen-Label für Familien (z.B. "Christian") — kein Login
+    # "gehört zu": freies Personen-Label für Familien (z.B. "Anna") — kein Login
     person: str | None = Field(None, max_length=100)
     versicherer: str = Field(..., max_length=100)
     vertragsnummer: str = Field(..., max_length=50)
@@ -155,6 +155,10 @@ class InvoiceCreate(BaseModel):
     purchase_date: date | None = None
     amount_eur: float | None = Field(None, ge=0, le=1_000_000)
     notes: str | None = Field(None, max_length=2000)
+
+
+class InvoiceUpdate(InvoiceCreate):
+    """Nachträgliche Korrektur einer Rechnung (PATCH) — nur mitgeschickte Felder ändern sich."""
 
 
 class InvoiceAnalysisPreview(BaseModel):

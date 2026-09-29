@@ -129,17 +129,41 @@ npm run build
 Im Datenverzeichnis werden die persistenten Dateien abgelegt:
 
 - `data/documents/`
-- `data/db/insurance.sqlite`
+- `data/invoices/` (Rechnungen/Kaufbelege)
+- `data/db/insurance.sqlite` (+ `insurance.sqlite-wal`, `-shm` im laufenden Betrieb)
 - `data/vectordb/`
 
-### Empfehlung für Backups
+### Backups
 
-Mindestens regelmäßig sichern:
+**Automatisch:** Das Backend erstellt täglich um 03:30 ein Komplett-Backup als ZIP
+(Datenbank, Suchindex, alle Dokumente und Rechnungen) im Ordner `backups/` neben
+`data/`. War der Rechner zur geplanten Zeit aus, wird das Backup kurz nach dem
+nächsten Start nachgeholt. Jedes Archiv wird vor dem Speichern geprüft
+(SQLite-Integritätscheck, CRC aller Dateien). Aufbewahrt werden das jüngste Backup
+je Tag der letzten 7 Tage und je Monat der letzten 12 Monate. Schlägt ein Backup
+fehl, kommt eine Pushover-Meldung, und das Dashboard zeigt eine Warnung.
 
-- `.env`
-- `data/db/insurance.sqlite`
-- `data/vectordb/`
-- `data/documents/`
+Für Schutz vor Festplattenausfall den Backup-Ordner auf ein anderes Laufwerk, ein
+NAS oder einen Cloud-Sync-Ordner legen — in `.env`:
+
+```
+BACKUP_HOST_DIR=D:/Backups/versicherung
+```
+
+danach `docker compose up -d`.
+
+**Manuell:** Dashboard → **Backup** lädt dasselbe ZIP sofort herunter.
+
+**Wiederherstellen:** Backend stoppen, Inhalt des ZIPs nach `data/` entpacken
+(`db/`, `vectordb/`, `documents/`, `invoices/`), dabei alte
+`insurance.sqlite-wal`/`-shm` löschen, Backend starten.
+
+Zusätzlich sichern: `.env` (enthält die API-Schlüssel, liegt nicht im Backup).
+
+> Nie nur `data/db/insurance.sqlite` kopieren: Im laufenden Betrieb liegen die
+> neuesten Änderungen in `insurance.sqlite-wal`. Das Backend schreibt sie beim
+> Start, beim Stoppen und nach jedem Backup in die Hauptdatei zurück — für
+> Sicherungen trotzdem immer das Backup-ZIP verwenden.
 
 ## Pushover-Betrieb
 
@@ -161,8 +185,12 @@ Der APScheduler läuft im Backend-Prozess.
 Jobs:
 
 - täglich 08:00 Uhr lokaler Zeit — Notification-Check + Bereinigung verwaister Uploads
+- täglich 03:30 Uhr — Komplett-Backup nach `backups/` (siehe „Backups"), plus
+  Nachholen kurz nach dem Start, wenn das letzte Backup älter als 20 Stunden ist
 - wöchentlich (Mo 03:00) — Auffrischung von Empfehlungen, die älter als ein Jahr sind
-- monatlich (1., 02:00 UTC) — konsistentes SQLite-Backup (Aufbewahrung 3 Monate)
+
+War der Rechner zur geplanten Zeit im Standby, holt der Scheduler einen Job bis zu
+6 Stunden später einmalig nach.
 
 Verarbeitung beim Notification-Check:
 
@@ -203,7 +231,8 @@ Erwartete Antwort:
 
 ### Sinnvolle Regelaufgaben
 
-- Backups prüfen (der Scheduler legt monatlich automatisch ein SQLite-Backup unter `data/db/` an)
+- Backups prüfen: Tooltip am **Backup**-Button im Dashboard zeigt das letzte
+  automatische Backup; ab und zu ein ZIP testweise öffnen
 - Logs kontrollieren
 - Pushover-Zustellung testen
 - Suchindex prüfen: im Assistenten den Button **Suchindex prüfen** ausführen

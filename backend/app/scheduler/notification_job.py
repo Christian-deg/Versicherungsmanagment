@@ -1,17 +1,18 @@
-"""APScheduler-Job: prüft täglich Abläufe und triggert Pushover-Notifications."""
+"""APScheduler-Jobs: tägliche Erinnerungen (Pushover), tägliches Backup, Empfehlungs-Auffrischung."""
 from __future__ import annotations
 
 import logging
 from calendar import monthrange
 from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
 
+import anyio.to_thread
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models.database import SessionLocal
+from app.models.database import SessionLocal, checkpoint_wal
 from app.models.enums import (
     CANCELLATION_TRIGGERS_DAYS,
     NOTIFICATION_TRIGGERS_DAYS,
@@ -19,8 +20,10 @@ from app.models.enums import (
     NotificationStatus,
 )
 from app.models.models import Document, Insurance, Notification, Product
-from app.services.pushover_service import PushoverError, send_push
+from app.services import backup_service
+from app.services.pushover_service import PushoverError, notify_failure, send_push
 from app.services.recommendation_service import refresh_stale
+from app.services.storage_service import delete_stored_file
 
 log = logging.getLogger(__name__)
 _scheduler: AsyncIOScheduler | None = None
@@ -264,13 +267,15 @@ async def run_notification_job() -> None:
     log.info("Notification-Job gestartet")
     _cleanup_orphan_documents()
     _cleanup_incoming()
-    if not settings.pushover_user_key or not settings.pushover_app_token:
-        log.warning("Pushover nicht konfiguriert — überspringe Versand")
-        return
     try:
         with SessionLocal() as db:
+            # Immer berechnen — der Erinnerungs-Verlauf in der UI soll auch ohne
+            # Pushover-Konfiguration gefüllt werden (Einträge bleiben dann PENDING)
             _build_pending(db)
-            await _send_due(db)
+            if settings.pushover_user_key and settings.pushover_app_token:
+                await _send_due(db)
+            else:
+                log.warning("Pushover nicht konfiguriert — überspringe Versand")
     except Exception as e:  # noqa: BLE001
         log.error("Notification-Job fehlgeschlagen: %s", e)
     log.info("Notification-Job beendet")
@@ -283,7 +288,6 @@ def _cleanup_orphan_documents() -> None:
     stehen, nachdem _cleanup_incoming nur die Datei gelöscht hat.
     """
     cutoff = datetime.now(UTC) - timedelta(hours=_INCOMING_MAX_AGE_HOURS)
-    base = settings.documents_dir.resolve()
     try:
         with SessionLocal() as db:
             orphans = (
@@ -291,16 +295,13 @@ def _cleanup_orphan_documents() -> None:
                 .filter(Document.insurance_id.is_(None), Document.uploaded_at < cutoff)
                 .all()
             )
+            stored_paths = [doc.stored_path for doc in orphans]
             for doc in orphans:
-                try:
-                    path = Path(doc.stored_path).resolve()
-                    if path.is_relative_to(base):
-                        path.unlink(missing_ok=True)
-                except OSError as e:
-                    log.warning("Orphan-Datei konnte nicht gelöscht werden (doc=%d): %s", doc.id, e)
                 db.delete(doc)
             if orphans:
                 db.commit()
+                for path in stored_paths:
+                    delete_stored_file(path, settings.documents_dir)
                 log.info("Verwaiste Dokument-Einträge bereinigt: %d", len(orphans))
     except Exception as e:  # noqa: BLE001
         log.error("Orphan-Dokument-Cleanup fehlgeschlagen: %s", e)
@@ -325,55 +326,27 @@ async def run_recommendation_refresh() -> None:
     log.info("Empfehlungs-Auffrischung beendet")
 
 
-def run_db_backup() -> None:
-    """Monatlicher Job: erstellt ein konsistentes SQLite-Backup im DB-Ordner.
+async def run_auto_backup(only_if_due: bool = False) -> None:
+    """Täglicher Job: geprüftes Komplett-Backup (DB + Dokumente + Rechnungen) in den Backup-Ordner.
 
-    Verwendet die SQLite-eigene Backup-API (kein simples Kopieren) — dadurch ist
-    das Backup auch bei laufenden Schreibzugriffen konsistent.
-    Alte Backups werden nach 3 Monaten automatisch gelöscht.
+    only_if_due=True (Start-Nachholung): nur, wenn das letzte Backup älter als
+    AUTO_BACKUP_MAX_AGE ist — z. B. weil der Rechner zur geplanten Zeit aus war.
+    Fehler kommen per Push, damit ein ausfallendes Backup nicht unbemerkt bleibt.
     """
-    import sqlite3
-
-    db_path = settings.data_dir / "db" / "insurance.sqlite"
-    backup_dir = settings.data_dir / "db"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-
-    # Pfad-Traversal-Schutz
-    if not db_path.resolve().is_relative_to(settings.data_dir.resolve()):
-        log.error("Ungültiger DB-Pfad beim Backup — abgebrochen")
+    if only_if_due and not backup_service.auto_backup_due():
         return
-    if not db_path.exists():
-        log.warning("DB-Datei nicht gefunden, Backup übersprungen")
-        return
-
-    timestamp = datetime.now(UTC).strftime("%Y-%m")
-    backup_path = backup_dir / f"insurance.backup.{timestamp}.sqlite"
-
     try:
-        src = sqlite3.connect(str(db_path))
-        dst = sqlite3.connect(str(backup_path))
-        with dst:
-            src.backup(dst)
-        dst.close()
-        src.close()
-        log.info("DB-Backup erstellt: %s", backup_path.name)
+        await anyio.to_thread.run_sync(backup_service.create_auto_backup)
     except Exception as e:  # noqa: BLE001
-        log.error("DB-Backup fehlgeschlagen: %s", e)
+        log.exception("Automatisches Backup fehlgeschlagen")
+        await notify_failure(
+            "⚠ Automatisches Backup fehlgeschlagen",
+            f"Die tägliche Datensicherung (Datenbank, Dokumente, Rechnungen) ist fehlgeschlagen: "
+            f"{str(e)[:300]} — Backup-Ordner prüfen oder im Dashboard manuell sichern.",
+        )
         return
-
-    # Backups älter als 3 Monate löschen
-    cutoff = datetime.now(UTC).replace(day=1) - timedelta(days=90)
-    for f in backup_dir.glob("insurance.backup.*.sqlite"):
-        try:
-            stem = f.stem  # z.B. "insurance.backup.2026-01"
-            parts = stem.split(".")
-            year, month = int(parts[2].split("-")[0]), int(parts[2].split("-")[1])
-            backup_date = datetime(year, month, 1, tzinfo=UTC)
-            if backup_date < cutoff:
-                f.unlink()
-                log.info("Altes Backup gelöscht: %s", f.name)
-        except (ValueError, IndexError, OSError) as e:
-            log.warning("Backup-Datei konnte nicht geprüft/gelöscht werden (%s): %s", f.name, e)
+    # Hält insurance.sqlite auch für reine Datei-Kopien des Datenordners aktuell
+    await anyio.to_thread.run_sync(checkpoint_wal)
 
 
 def _cleanup_incoming() -> None:
@@ -409,11 +382,20 @@ def start_scheduler() -> None:
     global _scheduler
     if _scheduler is not None:
         return
-    _scheduler = AsyncIOScheduler()
+    # misfire_grace_time: Standard ist 1 s — war der Rechner zur geplanten Zeit im
+    # Standby, fiel der Job sonst für den ganzen Tag aus (coalesce: nur einmal nachholen)
+    _scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 6 * 3600, "coalesce": True})
     # Täglich um 08:00 lokaler Zeit
     _scheduler.add_job(run_notification_job, CronTrigger(hour=8, minute=0), id="daily_notifications")
-    # Monatlich am 1. um 02:00 UTC — DB-Backup
-    _scheduler.add_job(run_db_backup, CronTrigger(day=1, hour=2, minute=0), id="monthly_db_backup")
+    # Täglich um 03:30 — Komplett-Backup inkl. Dokumenten und Rechnungen
+    _scheduler.add_job(run_auto_backup, CronTrigger(hour=3, minute=30), id="daily_backup")
+    # Kurz nach dem Start nachholen, falls das letzte Backup zu alt ist (Rechner war aus)
+    _scheduler.add_job(
+        run_auto_backup,
+        DateTrigger(run_date=datetime.now() + timedelta(minutes=2)),
+        kwargs={"only_if_due": True},
+        id="startup_backup_catchup",
+    )
     # Wöchentlich (Mo 03:00) — Empfehlungen auffrischen, die älter als ein Jahr sind
     _scheduler.add_job(
         run_recommendation_refresh,
@@ -421,7 +403,7 @@ def start_scheduler() -> None:
         id="weekly_recommendation_refresh",
     )
     _scheduler.start()
-    log.info("APScheduler gestartet (täglich 08:00)")
+    log.info("APScheduler gestartet (Erinnerungen täglich 08:00, Backup täglich 03:30)")
 
 
 def stop_scheduler() -> None:

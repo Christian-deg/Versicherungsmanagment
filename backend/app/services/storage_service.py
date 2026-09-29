@@ -1,6 +1,8 @@
 """Sichere Dokumenten-Ablage mit UUID-Dateinamen + Pfad-Traversal-Schutz."""
 from __future__ import annotations
 
+import base64
+import io
 import logging
 import uuid
 from datetime import date
@@ -33,6 +35,50 @@ class StorageError(ValueError):
 # Obergrenze der gerenderten Pixel je PDF-Seite (A4 bei 150 dpi ≈ 2,2 MP;
 # 20 MP ≈ 60 MB unkomprimiert) — Schutz vor Dekompressions-Bomben
 _MAX_PAGE_PIXELS = 20_000_000
+
+# Längste Bildkante für KI-Analysen: OpenAI skaliert größere Bilder ohnehin
+# herunter — kleinere Payloads sparen Upload-Zeit und Tokens
+_MAX_IMAGE_EDGE = 2048
+
+
+def image_data_url(img: bytes) -> str:
+    """Base64-Data-URL mit dem tatsächlichen Bildformat (JPEG oder PNG).
+
+    Handyfotos sind JPEG — sie als image/png zu deklarieren ist falsch und
+    hängt davon ab, dass die API das Format selbst erkennt.
+    """
+    mime = "image/jpeg" if img.startswith(MAGIC_BYTES[".jpg"]) else "image/png"
+    return f"data:{mime};base64,{base64.b64encode(img).decode('ascii')}"
+
+
+def _normalize_image(data: bytes) -> bytes:
+    """Dreht Fotos gemäß EXIF-Ausrichtung und verkleinert große Bilder für die KI.
+
+    Unverändert zurück, wenn nichts zu tun ist oder das Bild nicht lesbar ist
+    (die KI-Analyse bekommt dann das Original — wie bisher).
+    """
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            fmt = img.format
+            orientation = img.getexif().get(0x0112, 1)  # EXIF-Tag "Orientation"
+            if orientation == 1 and max(img.size) <= _MAX_IMAGE_EDGE:
+                return data
+            if fmt == "JPEG":
+                # Dekodiert direkt verkleinert (DCT-Skalierung) — spart RAM bei 50-MP-Fotos
+                img.draft("RGB", (_MAX_IMAGE_EDGE, _MAX_IMAGE_EDGE))
+            out = ImageOps.exif_transpose(img)
+            out.thumbnail((_MAX_IMAGE_EDGE, _MAX_IMAGE_EDGE))
+            buf = io.BytesIO()
+            if fmt == "JPEG":
+                out.convert("RGB").save(buf, format="JPEG", quality=90)
+            else:
+                out.save(buf, format="PNG")
+            return buf.getvalue()
+    except Exception as e:  # noqa: BLE001
+        log.warning("Bild konnte nicht normalisiert werden — verwende Original: %s", e)
+        return data
 
 
 def validate_upload(filename: str, content: bytes, max_bytes: int | None = None) -> tuple[str, str]:
@@ -158,11 +204,31 @@ def resolve_stored_path(stored_path: str, base: Path) -> Path | None:
     return None
 
 
-def read_document_image_bytes(stored_path: str) -> list[bytes]:
-    """Liest ein gespeichertes Dokument und gibt eine Liste von PNG-Bildern zurück.
+def delete_stored_file(stored_path: str, base: Path) -> bool:
+    """Löscht eine gespeicherte Datei sicher (Pfad wird via resolve_stored_path gegen base verankert).
 
-    PDFs werden via PyMuPDF in PNG-Bilder gerendert.
-    Bilder werden direkt zurückgegeben.
+    Dieselbe Umgebungs-Umverankerung (Docker ↔ lokal) wie beim Lesen — sonst
+    bleiben nach einem Umgebungswechsel beim Löschen still Datei-Leichen liegen.
+    Gibt False zurück, wenn der Pfad nicht auflösbar ist oder das Löschen fehlschlägt.
+    """
+    path = resolve_stored_path(stored_path, base)
+    if path is None:
+        log.warning("Pfad nicht sicher auflösbar — Datei nicht gelöscht: %s", stored_path)
+        return False
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("Datei konnte nicht gelöscht werden (%s): %s", path.name, e)
+        return False
+    return True
+
+
+def read_document_image_bytes(stored_path: str) -> list[bytes]:
+    """Liest ein gespeichertes Dokument und gibt eine Liste von Bildern (PNG/JPEG) zurück.
+
+    PDFs werden via PyMuPDF in PNG-Bilder gerendert. Fotos werden gemäß EXIF
+    gedreht und auf max. _MAX_IMAGE_EDGE verkleinert (Format bleibt erhalten).
+    Für die KI-Übergabe image_data_url() verwenden (setzt den passenden MIME-Typ).
     """
     base = settings.documents_dir.resolve()
     path = resolve_stored_path(stored_path, base)
@@ -194,7 +260,7 @@ def read_document_image_bytes(stored_path: str) -> list[bytes]:
             raise StorageError(f"PDF konnte nicht gelesen werden: {path.name}") from e
         return images
 
-    return [path.read_bytes()]
+    return [_normalize_image(path.read_bytes())]
 
 
 def extract_document_text(stored_path: str) -> str:

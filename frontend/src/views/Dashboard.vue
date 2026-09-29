@@ -11,7 +11,7 @@
       <div class="d-flex flex-wrap ga-2">
         <v-btn color="primary" prepend-icon="mdi-cloud-upload" to="/upload">Dokument hochladen</v-btn>
         <v-btn variant="outlined" prepend-icon="mdi-robot" to="/chat">Assistent fragen</v-btn>
-        <v-tooltip text="Komplett-Backup herunterladen (Datenbank + alle Dokumente und Belege)" location="bottom">
+        <v-tooltip :text="backupTooltip" location="bottom">
           <template #activator="{ props }">
             <v-btn
               v-bind="props"
@@ -90,6 +90,13 @@
         </v-row>
       </v-card-text>
     </v-card>
+
+    <v-alert v-if="backupWarning" type="error" variant="tonal" class="mb-4" icon="mdi-database-alert">
+      {{ backupWarning }}
+      <template #append>
+        <v-btn variant="text" color="error" href="/api/exports/backup.zip">Jetzt sichern</v-btn>
+      </template>
+    </v-alert>
 
     <v-alert
       v-if="!initialLoading && (incompleteInsurances.length || incompleteProducts.length)"
@@ -193,9 +200,15 @@
           </v-card-title>
           <v-card-text>
             <div class="text-h3 mb-1">{{ formatEur(inventoryValue) }}</div>
-            <div class="text-body-2 text-medium-emphasis mb-3">
+            <div
+              class="text-body-2 text-medium-emphasis"
+              :class="inventoryValue > 0 ? 'mb-1' : 'mb-3'"
+            >
               aus {{ inventoryReceipts }} Beleg{{ inventoryReceipts === 1 ? '' : 'en' }}
               zu deinen aktiven Produkten
+            </div>
+            <div v-if="inventoryValue > 0" class="text-body-2 text-medium-emphasis mb-3">
+              davon {{ formatEur(inventoryWarrantyValue) }} noch mit Garantie
             </div>
             <v-alert type="info" variant="tonal" density="compact">
               Vergleiche den Wert mit der Deckungssumme deiner Hausratversicherung —
@@ -296,21 +309,26 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { documentsApi, insurancesApi, invoicesApi, productsApi } from '../api'
-import { categoryIcon } from '../constants'
+import { useRouter } from 'vue-router'
+import { documentsApi, exportsApi, insurancesApi, invoicesApi, productsApi } from '../api'
+import { categoryIcon, datetimeAxisLabels } from '../constants'
 import {
   daysLabel,
+  escapeHtml,
   expiryColor,
   formatCurrency,
   formatDate,
   daysUntil,
   getCancellationInfo,
+  hasActiveWarranty,
   parseDateValue,
   productQualityIssues,
   qualityIssues,
+  useChartTheme,
   yearlyPremium,
 } from '../utils'
 
+const router = useRouter()
 const insurances = ref([])
 const financial = ref(null)
 const warranty = ref(null)
@@ -384,47 +402,138 @@ const personBreakdown = computed(() => {
 
 // Kostenentwicklung: Gesamt-Jahresprämie zu jedem Zeitpunkt des Prämienverlaufs.
 // Je Versicherung gilt der jeweils letzte bekannte Stand (Stufenverlauf).
+// Der erste Eintrag je Versicherung (Basiswert bei Anlage) wird auf das
+// Abschlussdatum (start_date) gelegt, wenn vorhanden — die Prämie galt ab
+// Vertragsbeginn, nicht erst ab Erfassung in der App. Spätere Änderungen
+// behalten ihr Erfassungsdatum. Auf Kalendertage normalisiert: mehrere
+// Änderungen am selben Tag ergeben einen Punkt mit dem Tagesendstand.
+// Jeder Punkt trägt zusätzlich die Policen-Änderungen des Tages (changes),
+// damit Tooltip und Klick-Navigation wissen, welcher Vertrag dahintersteckt.
 const costTimeline = computed(() => {
-  const sorted = [...premiumHistory.value].sort(
-    (a, b) => new Date(a.changed_at) - new Date(b.changed_at)
-  )
+  const insById = new Map(insurances.value.map((i) => [i.id, i]))
+  const baselineRow = new Map()
+  for (const row of premiumHistory.value) {
+    const cur = baselineRow.get(row.insurance_id)
+    if (!cur || new Date(row.changed_at) < new Date(cur.changed_at)) {
+      baselineRow.set(row.insurance_id, row)
+    }
+  }
+  const entries = premiumHistory.value
+    .map((row) => {
+      const start =
+        baselineRow.get(row.insurance_id) === row
+          ? insById.get(row.insurance_id)?.start_date
+          : null
+      const day = start ? parseDateValue(start) : new Date(row.changed_at)
+      day.setHours(0, 0, 0, 0)
+      return { x: day.getTime(), row }
+    })
+    .sort((a, b) => a.x - b.x || new Date(a.row.changed_at) - new Date(b.row.changed_at))
   const currentByInsurance = new Map()
   const points = []
-  for (const row of sorted) {
-    currentByInsurance.set(row.insurance_id, yearlyPremium(row) ?? 0)
+  for (const { x, row } of entries) {
+    const prev = currentByInsurance.get(row.insurance_id) ?? null
+    const yearly = yearlyPremium(row) ?? 0
+    currentByInsurance.set(row.insurance_id, yearly)
     const total = [...currentByInsurance.values()].reduce((a, b) => a + b, 0)
-    const x = new Date(row.changed_at).getTime()
+    const change = {
+      id: row.insurance_id,
+      name: insById.get(row.insurance_id)?.name || `Vertrag ${row.insurance_id}`,
+      prev,
+      yearly,
+    }
     if (points.length && points[points.length - 1].x === x) {
-      points[points.length - 1].y = Math.round(total * 100) / 100
+      const p = points[points.length - 1]
+      p.y = Math.round(total * 100) / 100
+      p.changes.push(change)
     } else {
-      points.push({ x, y: Math.round(total * 100) / 100 })
+      points.push({ x, y: Math.round(total * 100) / 100, changes: [change] })
+    }
+  }
+  // Stufenlinie bis heute ziehen — sonst endet der Verlauf bei der letzten Änderung
+  if (points.length) {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    if (points[points.length - 1].x < today.getTime()) {
+      points.push({ x: today.getTime(), y: points[points.length - 1].y, changes: [] })
     }
   }
   return points
 })
 
 const costChartSeries = computed(() => [{ name: 'Jahresprämie gesamt', data: costTimeline.value }])
-const costChartOptions = {
-  chart: { toolbar: { show: false }, zoom: { enabled: false } },
+const chartTheme = useChartTheme()
+const costChartOptions = computed(() => ({
+  ...chartTheme.value,
+  chart: {
+    ...chartTheme.value.chart,
+    toolbar: { show: false },
+    zoom: { enabled: false },
+    events: {
+      // Klick/Tipp auf einen Datenpunkt öffnet die zugehörige Police;
+      // bei mehreren Änderungen am selben Tag die Vertragsliste
+      markerClick(_event, _ctx, { dataPointIndex }) {
+        const point = costTimeline.value[dataPointIndex]
+        if (!point?.changes?.length) return
+        const ids = [...new Set(point.changes.map((c) => c.id))]
+        router.push(ids.length === 1 ? `/insurances/${ids[0]}` : '/insurances')
+      },
+    },
+  },
   stroke: { curve: 'stepline', width: 3 },
-  xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+  xaxis: { type: 'datetime', labels: datetimeAxisLabels },
   yaxis: { labels: { formatter: (v) => formatCurrency(v) } },
-  tooltip: { x: { format: 'dd.MM.yyyy' }, y: { formatter: (v) => formatCurrency(v) } },
+  tooltip: {
+    ...chartTheme.value.tooltip,
+    // Zeigt, welche Police sich an diesem Punkt geändert hat (alt → neu)
+    custom({ dataPointIndex }) {
+      const point = costTimeline.value[dataPointIndex]
+      if (!point) return ''
+      const lines = (point.changes || [])
+        .map((c) =>
+          c.prev == null
+            ? `<div>🛡 ${escapeHtml(c.name)}: neu mit ${formatCurrency(c.yearly)} p.a.</div>`
+            : `<div>🛡 ${escapeHtml(c.name)}: ${formatCurrency(c.prev)} → ${formatCurrency(c.yearly)} p.a.</div>`
+        )
+        .join('')
+      const hint = point.changes?.length
+        ? '<div class="text-caption mt-1">Antippen öffnet die Police</div>'
+        : '<div class="text-caption mt-1">aktueller Stand bis heute</div>'
+      return (
+        `<div class="pa-2"><strong>${formatDate(new Date(point.x))}</strong>` +
+        ` · Gesamt: ${formatCurrency(point.y)} p.a.${lines}${hint}</div>`
+      )
+    },
+  },
   dataLabels: { enabled: false },
-  markers: { size: 4 },
-}
+  markers: { size: 4, hover: { sizeOffset: 2 } },
+}))
 
-// Erfasster Warenwert: Summe der Belegbeträge aktiver (nicht archivierter) Produkte
-const inventoryValue = computed(() => {
-  const active = new Set(products.value.filter((p) => !p.archived).map((p) => p.id))
-  return invoices.value
-    .filter((i) => active.has(i.product_id) && i.amount_eur != null)
-    .reduce((sum, i) => sum + i.amount_eur, 0)
-})
-const inventoryReceipts = computed(() => {
-  const active = new Set(products.value.filter((p) => !p.archived).map((p) => p.id))
-  return invoices.value.filter((i) => active.has(i.product_id) && i.amount_eur != null).length
-})
+// Erfasster Warenwert: Summe der Belegbeträge aktiver Produkte. Archivierte
+// (verkauft oder defekt) bleiben außen vor — sie gehören nicht mehr zum Bestand.
+const activeProductById = computed(
+  () => new Map(products.value.filter((p) => !p.archived).map((p) => [p.id, p]))
+)
+const inventoryInvoices = computed(() =>
+  invoices.value.filter((i) => i.amount_eur != null && activeProductById.value.has(i.product_id))
+)
+const inventoryValue = computed(() =>
+  inventoryInvoices.value.reduce((sum, i) => sum + i.amount_eur, 0)
+)
+const inventoryReceipts = computed(() => inventoryInvoices.value.length)
+
+// Anteil, der heute noch unter Garantie steht. Fehlt ein Garantieende, gelten
+// 2 Jahre ab Kauf als Annahme (siehe effectiveWarrantyEnd).
+const insuranceById = computed(() => new Map(insurances.value.map((i) => [i.id, i])))
+const inventoryWarrantyValue = computed(() =>
+  inventoryInvoices.value.reduce((sum, inv) => {
+    const product = activeProductById.value.get(inv.product_id)
+    const insurance = product?.linked_insurance_id
+      ? insuranceById.value.get(product.linked_insurance_id) ?? null
+      : null
+    return hasActiveWarranty(product, insurance) ? sum + inv.amount_eur : sum
+  }, 0)
+)
 
 // Kündigungs-Deadlines aller Verträge mit hinterlegtem "kündbar bis"
 const allCancellations = computed(() =>
@@ -490,14 +599,16 @@ const summaryText = computed(() => {
 
 const categoryChartSeries = computed(() => Object.values(financial.value?.by_category || {}))
 const categoryChartOptions = computed(() => ({
+  ...chartTheme.value,
   labels: Object.keys(financial.value?.by_category || {}),
-  legend: { position: 'bottom' },
+  legend: { ...chartTheme.value.legend, position: 'bottom' },
   // Absolute Euro-Werte auf den Segmenten statt Prozente
   dataLabels: {
     enabled: true,
     formatter: (val, opts) => formatCurrency(opts.w.globals.series[opts.seriesIndex]),
   },
   tooltip: {
+    ...chartTheme.value.tooltip,
     y: { formatter: (val) => formatCurrency(val) },
   },
   plotOptions: {
@@ -517,9 +628,36 @@ const categoryChartOptions = computed(() => ({
   },
 }))
 
+// Automatische Backups: Stand im Tooltip, Warnung bei Fehlschlag oder veraltetem Backup
+const backupStatus = ref(null)
+const BACKUP_MAX_AGE_DAYS = 3
+const formatDateTime = (value) =>
+  new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
+
+const backupTooltip = computed(() => {
+  const base = 'Komplett-Backup herunterladen (Datenbank + alle Dokumente und Belege)'
+  const s = backupStatus.value
+  if (!s?.last_backup_at) return base
+  return `${base} · Letztes automatisches Backup: ${formatDateTime(s.last_backup_at)} (${s.count} gespeichert)`
+})
+
+const backupWarning = computed(() => {
+  const s = backupStatus.value
+  if (!s) return ''
+  if (s.last_error) {
+    return `Das letzte automatische Backup ist fehlgeschlagen: ${s.last_error}`
+  }
+  if (s.last_backup_at && -daysUntil(s.last_backup_at.slice(0, 10)) > BACKUP_MAX_AGE_DAYS) {
+    return `Das letzte automatische Backup ist vom ${formatDateTime(s.last_backup_at)} — bitte prüfen, ob das Backend läuft.`
+  }
+  return ''
+})
+
 const formatEur = formatCurrency
 const initialLoading = ref(true)
 onMounted(async () => {
+  // Unabhängig vom restlichen Dashboard laden — ein Fehler hier soll nichts blockieren
+  exportsApi.backupStatus().then((s) => { backupStatus.value = s }).catch(() => {})
   try {
     // Parallel laden — die Abfragen sind unabhängig
     ;[
@@ -546,3 +684,10 @@ onMounted(async () => {
   }
 })
 </script>
+
+<style scoped>
+/* Datenpunkte im Kostenchart sind klickbar (markerClick → Police) */
+:deep(.apexcharts-marker) {
+  cursor: pointer;
+}
+</style>

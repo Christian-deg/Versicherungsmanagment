@@ -9,18 +9,18 @@ from agents import (
     Agent,
     GuardrailFunctionOutput,
     InputGuardrail,
-    ModelSettings,
     OutputGuardrail,
     Runner,
     function_tool,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.agents.guardrails import (
     GuardrailResult,
     check_freetext_fields,
     injection_input_guardrail,
 )
+from app.agents.model_config import model_settings
 from app.agents.web_search_tool import web_search
 from app.config import settings
 from app.models.enums import Handlungsbedarf, Kategorie
@@ -43,6 +43,7 @@ REFERENCE_VALUES_EUR_PER_YEAR: dict[str, dict[str, float]] = {
     Kategorie.LEBEN.value: {"min": 200, "avg": 800, "max": 3000},
     Kategorie.REISE.value: {"min": 15, "avg": 40, "max": 100},
     Kategorie.TIER.value: {"min": 150, "avg": 400, "max": 1000},
+    Kategorie.GERAETE.value: {"min": 30, "avg": 100, "max": 250},
     Kategorie.SONSTIGE.value: {"min": 0, "avg": 0, "max": 0},
 }
 
@@ -51,6 +52,13 @@ class Empfehlung(BaseModel):
     handlungsbedarf: Handlungsbedarf = Field(..., description="Empfohlener Handlungsbedarf")
     hinweis: str = Field(..., max_length=500, description="Kurzer Hinweis")
     details: str = Field(..., max_length=1000, description="Ausführlichere Begründung")
+
+    @field_validator("hinweis", "details", mode="before")
+    @classmethod
+    def _kuerzen(cls, v: object, info) -> object:
+        """Überlange Freitexte kürzen, statt die Empfehlung scheitern zu lassen."""
+        limit = 500 if info.field_name == "hinweis" else 1000
+        return v.strip()[:limit] if isinstance(v, str) else v
 
 
 FREETEXT_FIELDS = ["hinweis", "details"]
@@ -126,7 +134,8 @@ recommendation_agent = Agent(
     name="recommendation",
     instructions=REC_PROMPT,
     model=settings.model_chat,
-    model_settings=ModelSettings(max_tokens=800),
+    # Limit gilt je Modellaufruf und umfasst Reasoning-Tokens (siehe model_config)
+    model_settings=model_settings(settings.model_chat, 3000),
     output_type=Empfehlung,
     tools=[get_reference_values, get_versicherung_details, web_search],
     input_guardrails=[InputGuardrail(guardrail_function=injection_input_guardrail)],

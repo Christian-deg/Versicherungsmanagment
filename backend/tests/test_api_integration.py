@@ -843,13 +843,13 @@ def test_archived_product_excluded_from_warranty_status() -> None:
 
 def test_insurance_person_field_and_cost_breakdown() -> None:
     """Personen-Zuordnung: Feld wird gespeichert und in der Kostenaufteilung ausgewiesen."""
-    r = client.post("/api/insurances", json={**_INSURANCE_PAYLOAD, "person": "Christian", "praemie_eur": 240})
+    r = client.post("/api/insurances", json={**_INSURANCE_PAYLOAD, "person": "Anna", "praemie_eur": 240})
     ins_id = r.json()["id"]
-    assert r.json()["person"] == "Christian"
+    assert r.json()["person"] == "Anna"
 
     summary = client.get("/api/insurances/summary/financial").json()
     assert "by_person" in summary
-    assert summary["by_person"].get("Christian", 0) >= 240
+    assert summary["by_person"].get("Anna", 0) >= 240
 
     client.delete(f"/api/insurances/{ins_id}")
 

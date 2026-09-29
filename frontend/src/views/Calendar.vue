@@ -67,7 +67,8 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { insurancesApi, productsApi } from '../api'
-import { formatDate, parseDateValue } from '../utils'
+import { datetimeAxisLabels } from '../constants'
+import { escapeHtml, formatDate, parseDateValue, useChartTheme } from '../utils'
 
 const insurances = ref([])
 const products = ref([])
@@ -100,19 +101,23 @@ const series = computed(() => {
   const insData = insurances.value
     .filter((i) => i.start_date && i.end_date)
     .map((i) => ({ x: `🛡 ${i.name}`, y: [parseDateValue(i.start_date).getTime(), parseDateValue(i.end_date).getTime()], fillColor: '#1976d2' }))
+  // Archivierte Produkte ausblenden — konsistent mit dem ICS-Export des Backends
   const prodData = products.value
-    .filter((p) => p.purchase_date && p.warranty_end)
+    .filter((p) => !p.archived && p.purchase_date && p.warranty_end)
     .map((p) => ({ x: `📦 ${p.name}`, y: [parseDateValue(p.purchase_date).getTime(), parseDateValue(p.warranty_end).getTime()], fillColor: '#26a69a' }))
   return [{ name: 'Laufzeit', data: [...insData, ...prodData] }]
 })
 
-const options = {
-  chart: { toolbar: { show: true } },
+const chartTheme = useChartTheme()
+const options = computed(() => ({
+  ...chartTheme.value,
+  chart: { ...chartTheme.value.chart, toolbar: { show: true } },
   plotOptions: { bar: { horizontal: true, distributed: false, barHeight: '60%' } },
-  xaxis: { type: 'datetime' },
+  xaxis: { type: 'datetime', labels: datetimeAxisLabels },
   dataLabels: { enabled: false },
   legend: { show: false },
   tooltip: {
+    ...chartTheme.value.tooltip,
     custom({ seriesIndex, dataPointIndex, w }) {
       const d = w.globals.initialSeries[seriesIndex].data[dataPointIndex]
       const start = escapeHtml(formatDate(d.y[0]))
@@ -120,16 +125,7 @@ const options = {
       return `<div class='pa-2'><strong>${escapeHtml(d.x)}</strong><br>${start} → ${end}</div>`
     },
   },
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
-}
+}))
 
 onMounted(async () => {
   try {

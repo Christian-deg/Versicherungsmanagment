@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -12,13 +11,14 @@ from app.config import settings
 from app.models.database import get_db
 from app.models.models import Insurance, Invoice, Product
 from app.schemas.schemas import ProductCreate, ProductRead
+from app.services import storage_service
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
 
 def _validate_linked_insurance(db: Session, payload: ProductCreate) -> None:
-    """SQLite erzwingt den FK nicht — Verknüpfung daher explizit prüfen."""
+    """Verknüpfung explizit prüfen — liefert ein sauberes 400 statt eines FK-IntegrityErrors (500)."""
     if payload.linked_insurance_id is not None and not db.get(Insurance, payload.linked_insurance_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -98,6 +98,13 @@ def update(product_id: int, payload: ProductCreate, db: Session = Depends(get_db
     _validate_linked_insurance(db, payload)
     for k, v in payload.model_dump().items():
         setattr(obj, k, v)
+    # Belege mindestens bis Garantieende aufbewahren — ein verlängertes Garantieende
+    # zieht die Aufbewahrungsfrist mit (verkürzt wird sie nie automatisch)
+    if obj.warranty_end:
+        for inv in db.query(Invoice).filter(
+            Invoice.product_id == obj.id, Invoice.retain_until < obj.warranty_end
+        ):
+            inv.retain_until = obj.warranty_end
     db.commit()
     db.refresh(obj)
     return obj
@@ -115,15 +122,13 @@ def delete(product_id: int, db: Session = Depends(get_db)) -> None:
     if not obj:
         raise HTTPException(status_code=404, detail="Produkt nicht gefunden")
 
-    base = settings.invoices_dir.resolve()
+    stored_paths = []
     for inv in db.query(Invoice).filter(Invoice.product_id == product_id).all():
-        try:
-            path = Path(inv.stored_path).resolve()
-            if path.is_relative_to(base):
-                path.unlink(missing_ok=True)
-        except OSError as e:
-            log.warning("Rechnungsdatei konnte nicht gelöscht werden (invoice=%d): %s", inv.id, e)
+        stored_paths.append(inv.stored_path)
         db.delete(inv)
 
     db.delete(obj)
     db.commit()
+    # Dateien erst nach dem Commit löschen (sonst Einträge ohne Datei bei Commit-Fehler)
+    for path in stored_paths:
+        storage_service.delete_stored_file(path, settings.invoices_dir)

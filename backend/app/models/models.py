@@ -22,7 +22,7 @@ class Insurance(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     kategorie: Mapped[Kategorie] = mapped_column(SAEnum(Kategorie), nullable=False)
-    # Familien-Zuordnung ("gehört zu"): freies Label wie "Christian" — bewusst
+    # Familien-Zuordnung ("gehört zu"): freies Label wie "Anna" — bewusst
     # keine Benutzerverwaltung, nur ein Filter-/Anzeige-Feld
     person: Mapped[str | None] = mapped_column(String(100), nullable=True)
     versicherer: Mapped[str] = mapped_column(String(100), nullable=False)

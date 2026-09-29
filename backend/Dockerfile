@@ -17,9 +17,9 @@ RUN uv sync --frozen --no-dev --no-install-project
 # Anwendungscode
 COPY app ./app
 
-# Nicht als root laufen; /app/data wird per Volume gemountet
+# Nicht als root laufen; /app/data und /app/backups werden per Volume gemountet
 RUN useradd --create-home --uid 1000 appuser \
-    && mkdir -p /app/data \
+    && mkdir -p /app/data /app/backups \
     && chown -R appuser:appuser /app
 USER appuser
 

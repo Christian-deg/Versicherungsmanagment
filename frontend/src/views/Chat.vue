@@ -262,8 +262,9 @@ function sendExample(question) {
 
 function scrollToBottom() {
   nextTick(() => {
-    const container = messagesContainer.value
-    container?.scrollTo?.({ top: container?.scrollHeight ?? 0, behavior: 'smooth' })
+    // Ref auf <v-card-text> liefert die Komponenteninstanz — scrollen muss das DOM-Element ($el)
+    const el = messagesContainer.value?.$el
+    el?.scrollTo?.({ top: el.scrollHeight, behavior: 'smooth' })
   })
 }
 </script>

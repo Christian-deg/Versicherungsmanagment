@@ -21,7 +21,7 @@
                 v-model="editing.person"
                 :items="personSuggestions"
                 label="Gehört zu – optional"
-                hint="z. B. Christian — für die Familien-Übersicht"
+                hint="z. B. Anna — für die Familien-Übersicht"
                 persistent-hint
                 clearable
               />

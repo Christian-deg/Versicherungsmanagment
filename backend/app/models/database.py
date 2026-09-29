@@ -1,12 +1,15 @@
 """SQLAlchemy DB-Setup."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
+
+log = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -93,6 +96,24 @@ def _migrate_db() -> None:
         conn.commit()
 
 
+def checkpoint_wal() -> None:
+    """Schreibt das Write-Ahead-Log in die Hauptdatei insurance.sqlite zurück.
+
+    SQLite macht das automatisch erst ab ~4 MB WAL oder beim Schließen der
+    letzten Verbindung — beides passiert hier kaum (der Pool hält Verbindungen
+    offen). Ohne Checkpoint war die Hauptdatei monatelang veraltet: eine
+    Datei-Kopie von insurance.sqlite allein (ohne -wal) hätte die Hälfte der
+    Daten verloren. Fehler sind unkritisch (die Daten liegen sicher im WAL).
+    """
+    try:
+        with engine.connect() as conn:
+            busy, _, _ = conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)").one()
+        if busy:
+            log.info("WAL-Checkpoint unvollständig (Datenbank gerade in Benutzung)")
+    except Exception:  # noqa: BLE001
+        log.warning("WAL-Checkpoint fehlgeschlagen", exc_info=True)
+
+
 def init_db() -> None:
     """Erstellt alle Tabellen (für Single-User-Setup ausreichend, sonst Alembic)."""
     # Modelle importieren, damit metadata sie kennt
@@ -100,6 +121,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _migrate_db()
+    checkpoint_wal()
 
 
 def get_db() -> Generator[Session]:

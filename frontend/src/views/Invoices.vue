@@ -8,7 +8,8 @@
         </p>
       </div>
       <v-spacer />
-      <v-btn color="primary" prepend-icon="mdi-upload" :block="smAndDown" @click="openUpload">
+      <!-- openUpload() mit Klammern: ohne sie würde das Click-Event als presetFile landen -->
+      <v-btn color="primary" prepend-icon="mdi-upload" :block="smAndDown" @click="openUpload()">
         Rechnung hochladen
       </v-btn>
     </div>
@@ -55,7 +56,7 @@
         icon="mdi-receipt-text-outline"
       >
         <template #actions>
-          <v-btn color="primary" prepend-icon="mdi-upload" @click="openUpload">Rechnung hochladen</v-btn>
+          <v-btn color="primary" prepend-icon="mdi-upload" @click="openUpload()">Rechnung hochladen</v-btn>
         </template>
       </v-empty-state>
       <v-card v-for="item in filteredItems" :key="item.id" class="mb-3">
@@ -92,6 +93,7 @@
             variant="text"
             :href="`/api/invoices/${item.id}/download`"
           />
+          <v-btn icon="mdi-pencil" size="small" variant="text" aria-label="Bearbeiten" @click="openEdit(item)" />
           <v-btn
             icon="mdi-delete"
             size="small"
@@ -143,6 +145,11 @@
             />
           </template>
         </v-tooltip>
+        <v-tooltip text="Bearbeiten (Kaufdatum, Betrag, Notiz)" location="top">
+          <template #activator="{ props }">
+            <v-btn v-bind="props" icon="mdi-pencil" size="small" variant="text" @click="openEdit(item)" />
+          </template>
+        </v-tooltip>
         <v-tooltip :text="canDelete(item.retain_until) ? 'Löschen' : `Löschen (Aufbewahrung bis ${formatDate(item.retain_until)} — Bestätigung nötig)`" location="top">
           <template #activator="{ props }">
             <v-btn
@@ -163,7 +170,7 @@
           icon="mdi-receipt-text-outline"
         >
           <template #actions>
-            <v-btn color="primary" prepend-icon="mdi-upload" @click="openUpload">Rechnung hochladen</v-btn>
+            <v-btn color="primary" prepend-icon="mdi-upload" @click="openUpload()">Rechnung hochladen</v-btn>
           </template>
         </v-empty-state>
       </template>
@@ -258,7 +265,7 @@
             <v-text-field v-model="newProduct.name" label="Produktname *" />
             <v-row>
               <v-col cols="12" sm="6">
-                <v-text-field v-model="newProduct.kategorie" label="Kategorie (frei)" />
+                <ProductCategoryField v-model="newProduct.kategorie" />
               </v-col>
               <v-col cols="12" sm="6">
                 <v-text-field
@@ -317,7 +324,9 @@
       </v-card>
     </v-dialog>
 
-    <v-snackbar v-model="snack.show" :color="snack.color">{{ snack.text }}</v-snackbar>
+    <InvoiceEditDialog v-model="editDialog" :invoice="editTarget" @saved="onEdited" />
+
+    <v-snackbar v-model="snack.show" :color="snack.color" :timeout="snack.timeout || 5000">{{ snack.text }}</v-snackbar>
   </div>
 </template>
 
@@ -326,8 +335,10 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDisplay } from 'vuetify'
 import { invoicesApi, productsApi } from '../api'
+import InvoiceEditDialog from '../components/InvoiceEditDialog.vue'
+import ProductCategoryField from '../components/ProductCategoryField.vue'
 import { useTransferStore } from '../stores/transfer'
-import { formatDate, formatCurrency, daysUntil, persistedRef } from '../utils'
+import { formatDate, formatCurrency, daysUntil, parseDateValue, persistedRef, toIsoDate } from '../utils'
 
 const transfer = useTransferStore()
 
@@ -446,14 +457,11 @@ const retainPreview = computed(() => {
   } else {
     warrantyEnd = newProduct.value.warranty_end || null
   }
-  const minRetain = new Date(form.value.purchase_date)
-  minRetain.setDate(minRetain.getDate() + 730)
-  let retain = minRetain
-  if (warrantyEnd) {
-    const we = new Date(warrantyEnd)
-    if (we > retain) retain = we
-  }
-  return formatDate(retain.toISOString().slice(0, 10))
+  // Lokale Daten (parseDateValue) — wie im Backend: max(Kaufdatum + 730 Tage, Garantieende)
+  const retain = parseDateValue(form.value.purchase_date)
+  retain.setDate(retain.getDate() + 730)
+  const we = parseDateValue(warrantyEnd)
+  return formatDate(we && we > retain ? we : retain)
 })
 
 function clearProductFilter() {
@@ -498,23 +506,36 @@ async function doAnalyze() {
     // Auf dem Beleg genannte Garantiedauer → Garantieende vorbefüllen
     // (z.B. "3 Jahre Herstellergarantie" statt pauschal +2 Jahre)
     if (result.garantie_monate && result.purchase_date && !newProduct.value.warranty_end) {
-      const end = new Date(result.purchase_date)
+      const end = parseDateValue(result.purchase_date)
       end.setMonth(end.getMonth() + result.garantie_monate)
-      newProduct.value.warranty_end = end.toISOString().slice(0, 10)
+      newProduct.value.warranty_end = toIsoDate(end)
       snack.value = {
         show: true,
         color: 'info',
         text: `Beleg nennt ${result.garantie_monate} Monate Garantie — Garantieende vorbefüllt.`,
       }
+    } else if (!result.purchase_date && result.amount_eur == null) {
+      snack.value = {
+        show: true,
+        color: 'warning',
+        text: 'KI hat weder Kaufdatum noch Betrag erkannt – bitte Felder manuell ausfüllen.',
+      }
     }
     uploadStep.value = 2
   } catch (e) {
-    // Analyse fehlgeschlagen → trotzdem zu Schritt 2, Felder leer
+    // Analyse fehlgeschlagen → trotzdem zu Schritt 2, Felder leer; Grund anzeigen
+    // (z. B. "OpenAI-Guthaben aufgebraucht")
     form.value.purchase_date = ''
     form.value.amount_eur = ''
     form.value.notes = ''
     uploadStep.value = 2
-    snack.value = { show: true, color: 'warning', text: 'KI-Analyse nicht möglich – bitte Felder manuell ausfüllen.' }
+    const grund = e.response?.data?.detail || e.message
+    snack.value = {
+      show: true,
+      color: 'error',
+      timeout: 10000,
+      text: `KI-Analyse nicht möglich (${grund}) – bitte Felder manuell ausfüllen.`,
+    }
   } finally {
     analyzing.value = false
   }
@@ -524,29 +545,44 @@ async function doUpload() {
   uploading.value = true
   try {
     let productId = form.value.product_id
-    if (productMode.value === 'new') {
+    const createdNew = productMode.value === 'new'
+    if (createdNew) {
       // Produkt direkt mit anlegen — Kaufdatum von der Rechnung übernehmen
       const created = await productsApi.create({
         name: newProduct.value.name.trim(),
-        kategorie: newProduct.value.kategorie.trim() || 'Sonstiges',
+        kategorie: (newProduct.value.kategorie || '').trim() || 'Sonstiges',
         purchase_date: form.value.purchase_date || null,
         warranty_end: newProduct.value.warranty_end || null,
         linked_insurance_id: null,
         notes: '',
       })
       productId = created.id
+      // Scheitert gleich der Datei-Upload, darf ein erneuter Klick auf "Hochladen"
+      // kein zweites Produkt anlegen — ab jetzt gilt das angelegte als ausgewählt
+      products.value.push(created)
+      form.value.product_id = created.id
+      productMode.value = 'existing'
     }
     const file = Array.isArray(form.value.file) ? form.value.file[0] : form.value.file
     await invoicesApi.upload(productId, file, {
       purchaseDate: form.value.purchase_date || undefined,
-      amountEur: form.value.amount_eur ? parseFloat(form.value.amount_eur) : undefined,
+      // expliziter Vergleich statt Truthiness: ein Betrag von 0 soll erhalten bleiben
+      amountEur:
+        form.value.amount_eur !== '' && form.value.amount_eur != null
+          ? parseFloat(form.value.amount_eur)
+          : undefined,
       notes: form.value.notes || undefined,
     })
     uploadDialog.value = false
+    // Von der Produktseite gekommen → dorthin zurück
+    if (route.query.return === 'product' && productId) {
+      await router.push(`/products/${productId}`)
+      return
+    }
     snack.value = {
       show: true,
       color: 'success',
-      text: productMode.value === 'new'
+      text: createdNew
         ? 'Produkt angelegt und Rechnung hochgeladen.'
         : 'Rechnung erfolgreich hochgeladen.',
     }
@@ -556,6 +592,20 @@ async function doUpload() {
   } finally {
     uploading.value = false
   }
+}
+
+// Nachträgliche Korrektur (z. B. vergessener Betrag)
+const editDialog = ref(false)
+const editTarget = ref(null)
+
+function openEdit(item) {
+  editTarget.value = item
+  editDialog.value = true
+}
+
+async function onEdited() {
+  snack.value = { show: true, color: 'success', text: 'Rechnung aktualisiert.' }
+  await load()
 }
 
 function confirmDelete(item) {

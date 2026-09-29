@@ -672,6 +672,25 @@ Dateiname enthält das Datum (`versicherung-backup-YYYY-MM-DD.zip`).
 Response:
 - MIME: `application/zip`
 
+### `GET /api/exports/backup/status`
+
+Stand der automatischen täglichen Backups (liegen in `BACKUP_DIR`, Docker:
+Host-Ordner `BACKUP_HOST_DIR`, Standard `./backups`).
+
+```json
+{
+  "count": 8,
+  "total_mb": 470.2,
+  "last_backup_at": "2026-09-30T03:30:04",
+  "last_backup_mb": 58.8,
+  "last_error": null,
+  "last_error_at": null
+}
+```
+
+`last_error` ist gesetzt, wenn der letzte automatische Lauf seit dem Start des
+Backends fehlgeschlagen ist.
+
 ### `GET /api/exports/calendar.ics`
 
 iCalendar-Feed (RFC 5545) zum **Abonnieren** in Kalender-Apps (Apple/Google

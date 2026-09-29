@@ -6,16 +6,17 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import anyio.to_thread
+from agents.exceptions import OutputGuardrailTripwireTriggered
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.agents.invoice_agent import analyze_invoice, analyze_invoice_from_text
+from app.agents.invoice_agent import InvoiceExtraction, analyze_invoice, analyze_invoice_from_text
 from app.config import settings
 from app.models.database import get_db
 from app.models.models import Invoice, Product
-from app.schemas.schemas import InvoiceAnalysisPreview, InvoiceRead
-from app.services import storage_service
+from app.schemas.schemas import InvoiceAnalysisPreview, InvoiceRead, InvoiceUpdate
+from app.services import ki_fehler, storage_service
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -36,12 +37,71 @@ def _compute_retain_until(purchase_date: date | None, product: Product) -> date:
     return min_retain
 
 
+async def _analyze_stored_invoice(tmp_path: Path) -> InvoiceExtraction:
+    """Textlayer zuerst (schnell, günstig); Vision, wenn der Text keine Kerndaten liefert.
+
+    Scanner-PDFs haben oft einen leeren oder unbrauchbaren Textlayer — dann
+    muss das Bild ausgewertet werden. Wirft HTTPException bei Fehlschlag.
+    """
+    try:
+        native_text = await anyio.to_thread.run_sync(storage_service.extract_document_text, str(tmp_path))
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    text_result: InvoiceExtraction | None = None
+    if native_text.strip():
+        log.info("Rechnungsanalyse via Textlayer (%d Zeichen)", len(native_text))
+        try:
+            text_result = await analyze_invoice_from_text(native_text)
+        except Exception as e:  # noqa: BLE001
+            if ki_fehler.ist_dauerhaft(e):
+                # Guthaben leer / Key ungültig / Modell unbekannt: Vision scheitert genauso
+                log.exception("Rechnungsanalyse via Textlayer fehlgeschlagen")
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY, detail=await ki_fehler.melde_ki_fehler(e)
+                ) from e
+            log.warning("Rechnungsanalyse via Textlayer fehlgeschlagen — Vision-Fallback", exc_info=True)
+        if text_result is not None and text_result.hat_kerndaten:
+            return text_result
+        if text_result is not None:
+            log.info("Textlayer ohne Kaufdatum/Betrag — Vision-Fallback")
+    else:
+        log.info("Kein Textlayer — Rechnungsanalyse via Vision")
+
+    try:
+        images = await anyio.to_thread.run_sync(storage_service.read_document_image_bytes, str(tmp_path))
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    try:
+        vision_result = await analyze_invoice(images)
+    except OutputGuardrailTripwireTriggered as e:
+        log.warning("Rechnungsanalyse (Vision) vom Sicherheitsfilter blockiert")
+        if text_result is not None:
+            return text_result
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Beleg wurde vom Sicherheitsfilter abgelehnt.",
+        ) from e
+    except Exception as e:  # noqa: BLE001
+        log.exception("Rechnungsanalyse via Vision fehlgeschlagen")
+        if text_result is not None:
+            return text_result  # Teilergebnis aus dem Textlayer ist besser als nichts
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=await ki_fehler.melde_ki_fehler(e)
+        ) from e
+    return vision_result.ergaenzt_um(text_result)
+
+
 @router.post("/analyze", response_model=InvoiceAnalysisPreview)
 async def analyze_invoice_file(
     file: UploadFile = File(...),
 ) -> InvoiceAnalysisPreview:
     """Analysiert eine Rechnungsdatei per KI und gibt Kaufdatum, Betrag und Notiz zur
     Prüfung zurück. Der eigentliche Upload erfolgt erst nach Bestätigung.
+
+    KI-Fehler liefern 502 mit verständlicher Meldung (z. B. "Guthaben aufgebraucht")
+    statt einer leeren Extraktion.
     """
     import uuid
 
@@ -60,29 +120,14 @@ async def analyze_invoice_file(
     tmp_path = incoming / f"_analyze_{uuid.uuid4().hex}{suffix}"
     # Datei-I/O und PDF-Rendering blockieren — im Thread, damit der Event-Loop frei bleibt
     await anyio.to_thread.run_sync(tmp_path.write_bytes, content)
-
     try:
-        images = await anyio.to_thread.run_sync(storage_service.read_document_image_bytes, str(tmp_path))
-        native_text = await anyio.to_thread.run_sync(storage_service.extract_document_text, str(tmp_path))
-    except storage_service.StorageError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+        result = await _analyze_stored_invoice(tmp_path)
     finally:
         tmp_path.unlink(missing_ok=True)
 
-    # Nativen Textlayer versuchen (schneller + günstiger) — Vision nur als Fallback
-    if native_text:
-        log.info("Rechnungsanalyse via Textlayer (%d Zeichen)", len(native_text))
-        result = await analyze_invoice_from_text(native_text)
-    else:
-        log.info("Kein Textlayer — Rechnungsanalyse via Vision")
-        result = await analyze_invoice(images)
-    return InvoiceAnalysisPreview(
-        purchase_date=result.purchase_date,
-        amount_eur=result.amount_eur,
-        produkt_name=result.produkt_name,
-        garantie_monate=result.garantie_monate,
-        notes=result.notes,
-    )
+    if not result.hat_kerndaten:
+        log.info("Rechnungsanalyse ohne Kaufdatum und Betrag")
+    return InvoiceAnalysisPreview(**result.model_dump())
 
 
 @router.post("", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)
@@ -142,6 +187,9 @@ async def upload_invoice(
         notes=notes,
     )
     db.add(invoice)
+    # Kaufdatum des Produkts aus der Rechnung übernehmen, falls noch nicht erfasst
+    if pd and product.purchase_date is None:
+        product.purchase_date = pd
     db.commit()
     db.refresh(invoice)
     return invoice
@@ -168,6 +216,29 @@ def get_invoice(invoice_id: int, db: Session = Depends(get_db)) -> Invoice:
     inv = db.get(Invoice, invoice_id)
     if not inv:
         raise HTTPException(status_code=404, detail="Rechnung nicht gefunden")
+    return inv
+
+
+@router.patch("/{invoice_id}", response_model=InvoiceRead)
+def update_invoice(invoice_id: int, payload: InvoiceUpdate, db: Session = Depends(get_db)) -> Invoice:
+    """Korrigiert Kaufdatum, Betrag oder Notiz einer Rechnung (z. B. vergessener Betrag).
+
+    Nur mitgeschickte Felder ändern sich; ein explizites null leert das Feld.
+    Bei geändertem Kaufdatum wird die Aufbewahrungsfrist neu berechnet und ein
+    fehlendes Produkt-Kaufdatum ergänzt — wie beim Upload.
+    """
+    inv = db.get(Invoice, invoice_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Rechnung nicht gefunden")
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
+        setattr(inv, field, value)
+    if "purchase_date" in changes:
+        inv.retain_until = _compute_retain_until(inv.purchase_date, inv.product)
+        if inv.purchase_date and inv.product.purchase_date is None:
+            inv.product.purchase_date = inv.purchase_date
+    db.commit()
+    db.refresh(inv)
     return inv
 
 
@@ -228,12 +299,9 @@ def delete_invoice(invoice_id: int, force: bool = False, db: Session = Depends(g
     if force and inv.retain_until > date.today():
         log.info("Rechnung %d trotz laufender Frist (bis %s) gelöscht", inv.id, inv.retain_until)
 
-    base = settings.invoices_dir.resolve()
-    try:
-        path = Path(inv.stored_path).resolve()
-        if path.is_relative_to(base):
-            path.unlink(missing_ok=True)
-    except OSError as e:
-        log.warning("Rechnungsdatei konnte nicht gelöscht werden (invoice=%d): %s", inv.id, e)
+    stored_path = inv.stored_path
     db.delete(inv)
     db.commit()
+    # Datei erst nach dem Commit löschen — scheitert der Commit (z. B. DB gesperrt),
+    # bliebe sonst ein Rechnungs-Eintrag ohne Beleg-Datei zurück
+    storage_service.delete_stored_file(stored_path, settings.invoices_dir)

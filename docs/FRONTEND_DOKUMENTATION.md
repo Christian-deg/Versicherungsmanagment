@@ -105,7 +105,9 @@ Inhalte:
   Prämienverlauf; erscheint ab zwei Datenpunkten)
 - Kosten-Kachel zeigt zusätzlich die Aufteilung nach Person, sobald Verträge
   ein „gehört zu"-Label haben
-- Backup-Button im Kopfbereich (`/api/exports/backup.zip`)
+- Backup-Button im Kopfbereich (`/api/exports/backup.zip`); Tooltip zeigt das letzte
+  automatische Backup, eine Warnung erscheint bei Fehlschlag oder Backup älter als 3 Tage
+  (`/api/exports/backup/status`)
 - Liste der nächsten Abläufe
 - Liste der nächsten Kündigungsfristen („kündbar bis", mit Datum des dann
   wirksamen Vertragsendes)

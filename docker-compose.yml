@@ -6,8 +6,15 @@ services:
     env_file: .env
     environment:
       DATA_DIR: /app/data
+      BACKUP_DIR: /app/backups
+      # Scheduler (täglich 08:00) läuft auf Container-Lokalzeit — ohne TZ wäre das UTC
+      TZ: Europe/Berlin
     volumes:
       - ./data:/app/data
+      # Tägliche Komplett-Backups (Datenbank, Dokumente, Rechnungen). Für Schutz vor
+      # Festplattenausfall auf ein anderes Laufwerk/NAS legen, z. B. in .env:
+      # BACKUP_HOST_DIR=D:/Backups/versicherung
+      - ${BACKUP_HOST_DIR:-./backups}:/app/backups
     expose:
       - "8000"
 

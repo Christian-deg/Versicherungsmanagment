@@ -113,15 +113,6 @@
           <v-card height="100%">
             <v-card-title class="d-flex align-center">
               <v-icon icon="mdi-receipt-text" class="mr-2" />Kaufbelege
-              <v-spacer />
-              <v-btn
-                variant="text"
-                color="primary"
-                prepend-icon="mdi-robot"
-                :to="{ path: '/invoices', query: { product: item.id } }"
-              >
-                Mit KI-Analyse
-              </v-btn>
             </v-card-title>
             <v-card-text>
               <div class="d-flex flex-column flex-sm-row ga-2 align-sm-center mb-4">
@@ -132,10 +123,9 @@
                   density="comfortable"
                   hide-details
                   prepend-icon="mdi-paperclip"
-                  :disabled="uploading"
                 />
-                <v-btn color="primary" :loading="uploading" :disabled="!hasNewInvoiceFile || uploading" @click="uploadInvoice">
-                  Hochladen
+                <v-btn color="primary" prepend-icon="mdi-robot" :disabled="!hasNewInvoiceFile" @click="uploadInvoice">
+                  Hochladen &amp; analysieren
                 </v-btn>
               </div>
 
@@ -165,6 +155,13 @@
                       variant="text"
                       aria-label="Beleg herunterladen"
                       :href="`/api/invoices/${inv.id}/download`"
+                    />
+                    <v-btn
+                      icon="mdi-pencil"
+                      size="small"
+                      variant="text"
+                      aria-label="Beleg bearbeiten"
+                      @click="openInvoiceEdit(inv)"
                     />
                     <v-btn
                       icon="mdi-delete"
@@ -250,6 +247,8 @@
       </template>
     </v-empty-state>
 
+    <InvoiceEditDialog v-model="invoiceEditDialog" :invoice="invoiceEditTarget" @saved="onInvoiceEdited" />
+
     <v-snackbar v-model="snack.show" :color="snack.color">{{ snack.text }}</v-snackbar>
   </div>
 </template>
@@ -258,12 +257,15 @@
 import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { insurancesApi, invoicesApi, productsApi } from '../api'
+import InvoiceEditDialog from '../components/InvoiceEditDialog.vue'
 import ProductFormDialog from '../components/ProductFormDialog.vue'
 import { productIcon } from '../constants'
+import { useTransferStore } from '../stores/transfer'
 import { daysLabel, daysUntil, expiryColor, formatCurrency, formatDate, productQualityIssues } from '../utils'
 
 const route = useRoute()
 const router = useRouter()
+const transfer = useTransferStore()
 
 const item = ref(null)
 const invoices = ref([])
@@ -272,7 +274,6 @@ const loading = ref(true)
 const editDialog = ref(false)
 const deleteDialog = ref(false)
 const newInvoiceFile = ref(null)
-const uploading = ref(false)
 const invoiceDeleteDialog = ref(false)
 const invoiceDeleteTarget = ref(null)
 const forceInvoiceDelete = ref(false)
@@ -356,20 +357,28 @@ async function onDelete() {
   }
 }
 
-async function uploadInvoice() {
+// Nachträgliche Korrektur eines Belegs (z. B. vergessener Betrag)
+const invoiceEditDialog = ref(false)
+const invoiceEditTarget = ref(null)
+
+function openInvoiceEdit(inv) {
+  invoiceEditTarget.value = inv
+  invoiceEditDialog.value = true
+}
+
+async function onInvoiceEdited() {
+  snack.value = { show: true, color: 'success', text: 'Beleg aktualisiert.' }
+  // Neu laden: ein ergänztes Kaufdatum kann auch das Produkt ändern
+  await load()
+}
+
+// Beleg geht in den Rechnungs-Dialog: KI liest Kaufdatum/Betrag aus, der Nutzer
+// prüft — danach zurück zu diesem Produkt (return=product)
+function uploadInvoice() {
   const f = Array.isArray(newInvoiceFile.value) ? newInvoiceFile.value[0] : newInvoiceFile.value
   if (!f) return
-  uploading.value = true
-  try {
-    await invoicesApi.upload(productId, f, {})
-    snack.value = { show: true, color: 'success', text: 'Beleg hochgeladen.' }
-    newInvoiceFile.value = null
-    invoices.value = await invoicesApi.list(productId)
-  } catch (e) {
-    snack.value = { show: true, color: 'error', text: 'Upload fehlgeschlagen: ' + (e.response?.data?.detail || e.message) }
-  } finally {
-    uploading.value = false
-  }
+  transfer.setPendingInvoiceFile(f)
+  router.push({ path: '/invoices', query: { product: productId, return: 'product' } })
 }
 
 function confirmInvoiceDelete(inv) {

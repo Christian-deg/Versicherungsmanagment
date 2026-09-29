@@ -12,7 +12,7 @@
         </p>
         <v-text-field v-model="editing.name" label="Name" required />
         <v-row>
-          <v-col cols="12" sm="6"><v-text-field v-model="editing.kategorie" label="Kategorie (frei)" /></v-col>
+          <v-col cols="12" sm="6"><ProductCategoryField v-model="editing.kategorie" /></v-col>
           <v-col cols="12" sm="6">
             <v-text-field
               v-model="editing.seriennummer"
@@ -23,7 +23,14 @@
           </v-col>
         </v-row>
         <v-row>
-          <v-col cols="12" sm="6"><v-text-field v-model="editing.purchase_date" label="Kaufdatum" type="date" /></v-col>
+          <v-col cols="12" sm="6">
+            <v-text-field
+              v-model="editing.purchase_date"
+              label="Kaufdatum"
+              type="date"
+              @update:model-value="onPurchaseDateInput"
+            />
+          </v-col>
           <v-col cols="12" sm="6"><v-text-field v-model="editing.warranty_end" label="Garantieende" type="date" /></v-col>
         </v-row>
         <v-select
@@ -49,6 +56,8 @@
 import { computed, ref, watch } from 'vue'
 import { useDisplay } from 'vuetify'
 import { insurancesApi, productsApi } from '../api'
+import { parseDateValue, toIsoDate } from '../utils'
+import ProductCategoryField from './ProductCategoryField.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -82,16 +91,15 @@ watch(
   }
 )
 
-// Kaufdatum geändert → Garantieende automatisch auf +2 Jahre setzen (nur wenn noch leer)
-watch(
-  () => editing.value.purchase_date,
-  (newDate) => {
-    if (!newDate || editing.value.warranty_end) return
-    const d = new Date(newDate)
-    d.setFullYear(d.getFullYear() + 2)
-    editing.value.warranty_end = d.toISOString().slice(0, 10)
-  }
-)
+// Kaufdatum vom Nutzer geändert → Garantieende auf +2 Jahre setzen (nur wenn noch leer).
+// Bewusst kein watch: der feuerte schon beim Öffnen eines Produkts ohne Garantieende
+// und hat beim Speichern ungefragt ein Garantieende eingetragen.
+function onPurchaseDateInput(newDate) {
+  if (!newDate || editing.value.warranty_end) return
+  const d = parseDateValue(newDate)
+  d.setFullYear(d.getFullYear() + 2)
+  editing.value.warranty_end = toIsoDate(d)
+}
 
 function close(value) {
   emit('update:modelValue', Boolean(value))

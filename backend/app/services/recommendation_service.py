@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.agents.recommendation_agent import evaluate
 from app.models.enums import INTERVALS_PER_YEAR
 from app.models.models import Insurance, PremiumHistory, Recommendation
+from app.services import ki_fehler
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +111,10 @@ async def refresh_stale(db: Session) -> int:
         try:
             await generate_for_insurance(db, ins)
             count += 1
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.exception("Empfehlungs-Auffrischung fehlgeschlagen (insurance=%d)", ins.id)
+            if ki_fehler.ist_dauerhaft(e):
+                # Guthaben leer / Key ungültig: alle weiteren Aufrufe scheitern genauso
+                await ki_fehler.melde_ki_fehler(e)
+                break
     return count

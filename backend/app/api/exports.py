@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 import tempfile
-import zipfile
 from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -19,10 +17,10 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from app.config import settings
 from app.models.database import get_db
 from app.models.models import Insurance, Product
 from app.scheduler.notification_job import next_recurring_date
+from app.services import backup_service
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -136,42 +134,10 @@ def export_insurances_pdf(db: Session = Depends(get_db)) -> StreamingResponse:
 # Komplett-Backup (ZIP) — Datensicherung per Klick, ohne Konsole
 # ---------------------------------------------------------------------------
 
-def _add_sqlite_backup(zf: zipfile.ZipFile, db_path: Path, arcname: str) -> None:
-    """Fügt eine konsistente Kopie einer SQLite-DB hinzu (Backup-API statt Datei-Kopie)."""
-    if not db_path.exists():
-        return
-    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        src = sqlite3.connect(str(db_path))
-        dst = sqlite3.connect(str(tmp_path))
-        with dst:
-            src.backup(dst)
-        dst.close()
-        src.close()
-        zf.write(tmp_path, arcname)
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-
-def _add_directory(zf: zipfile.ZipFile, base: Path, arcprefix: str) -> None:
-    """Fügt alle Dateien eines Verzeichnisses hinzu (ohne temporäre _incoming-Uploads)."""
-    if not base.is_dir():
-        return
-    for f in sorted(base.rglob("*")):
-        if not f.is_file():
-            continue
-        rel = f.relative_to(base)
-        if rel.parts and rel.parts[0] == "_incoming":
-            continue
-        zf.write(f, f"{arcprefix}/{rel.as_posix()}")
-
-
 @router.get("/backup.zip")
 def export_backup() -> FileResponse:
     """Komplett-Backup als ZIP: Datenbank, Vektorindex, alle Dokumente und Belege.
 
-    PDFs/Bilder sind bereits komprimiert — ZIP_STORED hält den Export schnell.
     Die Datenbanken werden über die SQLite-Backup-API konsistent kopiert (auch
     bei laufenden Schreibzugriffen). Die ZIP-Datei entsteht in einer Temp-Datei
     und wird nach dem Download automatisch gelöscht.
@@ -179,11 +145,7 @@ def export_backup() -> FileResponse:
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_STORED) as zf:
-            _add_sqlite_backup(zf, settings.db_path, "db/insurance.sqlite")
-            _add_sqlite_backup(zf, settings.vectordb_dir / "vectors.sqlite", "vectordb/vectors.sqlite")
-            _add_directory(zf, settings.documents_dir.resolve(), "documents")
-            _add_directory(zf, settings.invoices_dir.resolve(), "invoices")
+        backup_service.write_backup_zip(tmp_path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -194,6 +156,12 @@ def export_backup() -> FileResponse:
         filename=f"versicherung-backup-{date.today().isoformat()}.zip",
         background=BackgroundTask(tmp_path.unlink, missing_ok=True),
     )
+
+
+@router.get("/backup/status")
+def backup_status() -> dict:
+    """Stand der automatischen täglichen Backups (letztes Backup, Anzahl, letzter Fehler)."""
+    return backup_service.backup_status()
 
 
 # ---------------------------------------------------------------------------
